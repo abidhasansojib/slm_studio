@@ -1,0 +1,15 @@
+{
+    "n_embd": 128,
+    "n_head": 4,
+    "n_layer": 4,
+    "block_size": 128,
+    "learning_rate": 0.0006,
+    "min_lr": 6e-05,
+    "batch_size": 16,
+    "max_iters": 1500,
+    "eval_interval": 100,
+    "save_interval": 500,
+    "num_threads": 4,
+    "dropout": 0.15,
+    "weight_decay": 0.1
+}
