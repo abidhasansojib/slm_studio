@@ -5,4 +5,5 @@ data_corpus/*
 *.log
 .DS_Store
 .env
-node_modules/
+data_corpus/*
+!data_corpus/.gitkeep
