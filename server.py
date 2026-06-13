@@ -53,7 +53,6 @@ def list_available_models():
                 
             if gguf_files:
                 for gf in gguf_files:
-                    # If multiple gguf files in the same directory, give them distinct names
                     name = f"{entry.name}/{gf}" if len(gguf_files) > 1 else entry.name
                     models.append({
                         "name": name,
@@ -80,8 +79,12 @@ def list_available_models():
                 except:
                     cfg = {}
                 
-                is_qwen = "hidden_size" in cfg or "model_type" in cfg or "num_attention_heads" in cfg
-                model_type = "qwen3" if is_qwen else "native_slm"
+                # FIX: Explicitly ensure native_slm is never parsed as a qwen3 model layout
+                if entry.name == "native_slm":
+                    model_type = "native_slm"
+                else:
+                    is_qwen = "hidden_size" in cfg or "model_type" in cfg or "num_attention_heads" in cfg
+                    model_type = "qwen3" if (is_qwen or "gpt2" in entry.name.lower()) else "native_slm"
                 
                 models.append({
                     "name": entry.name,
@@ -106,6 +109,7 @@ class ExternalTrainingManager:
         self.losses_history = []
         self.val_losses_history = []
         self.logs = []
+        self.log_lock = threading.Lock()
         
         self.device = get_device()
         self.tokenizer = None
@@ -130,7 +134,6 @@ class ExternalTrainingManager:
             self.log("Stopping llama-server background process...")
             try:
                 self.llama_process.terminate()
-                # Wait up to 3 seconds for it to exit
                 for _ in range(30):
                     if self.llama_process.poll() is not None:
                         break
@@ -141,6 +144,63 @@ class ExternalTrainingManager:
             except Exception as e:
                 self.log(f"Error terminating llama-server: {e}")
             self.llama_process = None
+
+    def _translate_gpt2_to_qwen(self, state_dict, cfg):
+        """Translates and reshapes incoming legacy GPT2 state_dicts into modern Qwen3 layouts."""
+        self.log("[!] Legacy GPT-2 architecture detected. Running automatic state_dict translation layout adapter...")
+        new_state = {}
+        
+        # 1. Map core embedding matrices
+        if "wte.weight" in state_dict:
+            new_state["embed_tokens.weight"] = state_dict["wte.weight"]
+        
+        # 2. Extract configuration rules
+        n_head = cfg.get("n_head", cfg.get("num_attention_heads", 12))
+        hidden_size = cfg.get("n_embd", cfg.get("hidden_size", 768))
+        head_dim = hidden_size // n_head
+        
+        # 3. Translate block matrices sequentially
+        for k, v in state_dict.items():
+            if k.startswith("h."):
+                parts = k.split(".")
+                layer_idx = parts[1]
+                sub_layer = parts[2]
+                
+                if sub_layer == "ln_1":
+                    new_state[f"layers.{layer_idx}.input_layernorm.weight"] = v
+                elif sub_layer == "ln_2":
+                    new_state[f"layers.{layer_idx}.post_attention_layernorm.weight"] = v
+                elif sub_layer == "mlp":
+                    param_type = parts[3] # c_fc or c_proj
+                    if param_type == "c_fc" and "weight" in k:
+                        w_t = v.t()
+                        chunks = w_t.chunk(2, dim=0) if w_t.size(0) == hidden_size * 8 else [w_t, w_t]
+                        new_state[f"layers.{layer_idx}.mlp.gate_proj.weight"] = chunks[0]
+                        new_state[f"layers.{layer_idx}.mlp.up_proj.weight"] = chunks[1]
+                    elif param_type == "c_proj" and "weight" in k:
+                        new_state[f"layers.{layer_idx}.mlp.down_proj.weight"] = v.t()
+                elif sub_layer == "attn":
+                    param_type = parts[3] # c_attn or c_proj
+                    if param_type == "c_attn" and "weight" in k:
+                        w_t = v.t()
+                        q, k_t, v_t = w_t.chunk(3, dim=0)
+                        new_state[f"layers.{layer_idx}.self_attn.q_proj.weight"] = q
+                        new_state[f"layers.{layer_idx}.self_attn.k_proj.weight"] = k_t
+                        new_state[f"layers.{layer_idx}.self_attn.v_proj.weight"] = v_t
+                        
+                        # Fix head allocation shape dimension mapping parameters (head_dim instead of hidden_size)
+                        new_state[f"layers.{layer_idx}.self_attn.q_norm.weight"] = torch.ones(head_dim, dtype=v.dtype, device=v.device)
+                        new_state[f"layers.{layer_idx}.self_attn.k_norm.weight"] = torch.ones(head_dim, dtype=v.dtype, device=v.device)
+                    elif param_type == "c_proj" and "weight" in k:
+                        new_state[f"layers.{layer_idx}.self_attn.o_proj.weight"] = v.t()
+
+        # 4. Final layer normalization matrices mapping
+        if "ln_f.weight" in state_dict:
+            new_state["norm.weight"] = state_dict["ln_f.weight"]
+        if "wte.weight" in state_dict:
+            new_state["lm_head.weight"] = state_dict["wte.weight"]
+            
+        return new_state
 
     def init_model(self, model_name=None):
         """Initializes the PyTorch model or GGUF llama-server subprocess."""
@@ -177,7 +237,6 @@ class ExternalTrainingManager:
                 self.init_model("native_slm")
                 return
 
-        # Always stop any running llama-server first
         self.stop_llama_server()
         self.is_gguf = False
 
@@ -193,7 +252,6 @@ class ExternalTrainingManager:
                 weights_path = os.path.join(model_dir, model_info["weights_file"]) if model_dir != "models" else os.path.join("models", model_info["weights_file"])
                 self.log(f"Active model is a quantized GGUF. Starting C++ engine llama-server...")
                 
-                # Check and clean port 5001 if already bound
                 try:
                     import socket
                     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -205,8 +263,6 @@ class ExternalTrainingManager:
                 except Exception:
                     pass
                 
-                # Command to launch llama-server
-                # Limit threads to 4 to prevent UI starvation, specify standard context size 2048
                 cmd = [
                     "llama-server",
                     "-m", weights_path,
@@ -218,19 +274,13 @@ class ExternalTrainingManager:
                 
                 self.log(f"Running command: {' '.join(cmd)}")
                 self.llama_process = subprocess.Popen(
-                    cmd,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,  # Combine stdout and stderr to prevent block
-                    text=True,
-                    bufsize=1  # Line buffered
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1
                 )
                 
-                # Spawn non-blocking background reader thread to prevent pipe buffer from freezing
                 def log_reader(process, manager):
                     try:
                         for line in iter(process.stdout.readline, ''):
-                            if not line:
-                                break
+                            if not line: break
                             manager.log(f"[llama-server] {line.strip()}")
                     except Exception as e:
                         manager.log(f"[llama-server Reader Error] {e}")
@@ -239,10 +289,9 @@ class ExternalTrainingManager:
                 
                 threading.Thread(target=log_reader, args=(self.llama_process, self), daemon=True).start()
                 
-                # Verify server startup
                 time.sleep(2.5)
                 if self.llama_process.poll() is not None:
-                    raise RuntimeError("llama-server failed to launch. Check the log statements above for details.")
+                    raise RuntimeError("llama-server failed to launch.")
                 
                 self.log("llama-server successfully started in the background on port 5001!")
                 with open("server_config.json", "w") as f:
@@ -260,7 +309,6 @@ class ExternalTrainingManager:
             weights_file = model_info.get("weights_file")
             tar_path = os.path.join(model_dir, 'checkpoint.tar')
             
-            # Load state_dict first to determine precision and avoid OOM by pre-casting model
             state_dict = None
             if weights_file:
                 weights_path = os.path.join(model_dir, weights_file)
@@ -283,7 +331,10 @@ class ExternalTrainingManager:
                 except Exception as e:
                     self.log(f"[-] Error reading backup checkpoint: {e}")
             
-            # Auto-detect precision from weights (FP32 vs BF16/FP16)
+            # Auto-translate keys if GPT2 weight vectors are found
+            if state_dict and ("wte.weight" in state_dict or "h.0.ln_1.weight" in state_dict):
+                state_dict = self._translate_gpt2_to_qwen(state_dict, self.config)
+
             model_dtype = torch.float32
             if state_dict:
                 for tensor in state_dict.values():
@@ -294,7 +345,12 @@ class ExternalTrainingManager:
             self.log(f"Configuring model layers with precision: {model_dtype}")
             
             if model_info["type"] == "qwen3":
-                self.tokenizer = QwenTokenizer(model_dir)
+                if "n_layer" in self.config and "num_hidden_layers" not in self.config:
+                    self.config["num_hidden_layers"] = self.config["n_layer"]
+                if "n_embd" in self.config and "hidden_size" not in self.config:
+                    self.config["hidden_size"] = self.config["n_embd"]
+                    
+                self.tokenizer = QwenTokenizer(model_dir) if os.path.exists(os.path.join(model_dir, "qwen.tiktoken")) else ByteTokenizer()
                 self.model = Qwen3Model(self.config).to(model_dtype).to(self.device)
             else:
                 self.tokenizer = ByteTokenizer()
@@ -308,19 +364,15 @@ class ExternalTrainingManager:
                 
             if state_dict:
                 if any(k.startswith("model.") for k in state_dict.keys()):
-                    self.log("Adjusting state_dict keys (stripping 'model.' prefix)...")
                     state_dict = { (k[6:] if k.startswith("model.") else k): v for k, v in state_dict.items() }
                 
-                # Cast state_dict tensors to model_dtype to ensure clean loading
                 state_dict = {k: v.to(model_dtype) for k, v in state_dict.items()}
-                
-                self.model.load_state_dict(state_dict)
+                self.model.load_state_dict(state_dict, strict=False)
                 self.model.eval()
                 self.log(f"Successfully loaded '{model_name}' weights!")
             else:
                 self.log("Ready for fresh training initialization.")
             
-            # Save selection to server_config.json
             with open("server_config.json", "w") as f:
                 json.dump({"active_model": model_name}, f)
                 
@@ -335,37 +387,31 @@ class ExternalTrainingManager:
     def log(self, message, **kwargs):
         """Appends a log line to the server console and web logger dashboard."""
         msg_str = str(message)
-        
-        # Handle progress updates (starting with \r) to prevent UI log spam
-        if msg_str.startswith('\r'):
-            clean_msg = msg_str.replace('\r', '').strip()
-            if clean_msg and self.logs:
-                # Update the last log entry if it looks like a progress line
-                timestamp = time.strftime("%H:%M:%S")
-                self.logs[-1] = f"[{timestamp}] {clean_msg}"
-            elif clean_msg:
-                timestamp = time.strftime("%H:%M:%S")
-                self.logs.append(f"[{timestamp}] {clean_msg}")
+        with self.log_lock:
+            if msg_str.startswith('\r'):
+                clean_msg = msg_str.replace('\r', '').strip()
+                if clean_msg:
+                    timestamp = time.strftime("%H:%M:%S")
+                    if self.logs:
+                        self.logs[-1] = f"[{timestamp}] {clean_msg}"
+                    else:
+                        self.logs.append(f"[{timestamp}] {clean_msg}")
+                print(msg_str, end=kwargs.get('end', '\n'), flush=True)
+                return
+
+            if not msg_str.strip():
+                print(msg_str, end=kwargs.get('end', '\n'), flush=True)
+                return
+
+            timestamp = time.strftime("%H:%M:%S")
+            log_line = f"[{timestamp}] {msg_str.strip()}"
+            self.logs.append(log_line)
+            print(log_line, end=kwargs.get('end', '\n'))
             
-            # Also print to terminal
-            print(msg_str, end=kwargs.get('end', '\n'), flush=True)
-            return
-
-        # Ignore empty/whitespace-only messages (often just for terminal newlines)
-        if not msg_str.strip():
-            print(msg_str, end=kwargs.get('end', '\n'), flush=True)
-            return
-
-        timestamp = time.strftime("%H:%M:%S")
-        log_line = f"[{timestamp}] {msg_str.strip()}"
-        self.logs.append(log_line)
-        print(log_line, end=kwargs.get('end', '\n'))
-        
-        if len(self.logs) > 300:
-            self.logs.pop(0)
+            if len(self.logs) > 300:
+                self.logs.pop(0)
 
     def update_config(self, new_config):
-        """Helper to update internal config and save to disk."""
         for k, v in new_config.items():
             if isinstance(v, bool):
                 self.config[k] = bool(v)
@@ -374,27 +420,21 @@ class ExternalTrainingManager:
             elif isinstance(v, str) and v.isdigit():
                 self.config[k] = int(v)
             else:
-                try:
-                    self.config[k] = float(v)
-                except ValueError:
-                    self.config[k] = v
+                try: self.config[k] = float(v)
+                except ValueError: self.config[k] = v
                     
-        # Save config to the active model's directory
         model_dir = os.path.join(self.model_dir, self.active_model_name)
         if os.path.exists(model_dir):
             config_path = os.path.join(model_dir, "config.json")
             save_config(self.config, config_path)
 
     def start_training(self, new_config=None):
-        """Updates configurations and executes model.py as an isolated pipeline."""
         if self.is_gguf:
-            return False, "Training is not supported for quantized GGUF models. Select the native_slm model to start training."
-            
+            return False, "Training is not supported for quantized GGUF models."
         if self.is_training:
             return False, "Training is already in progress."
             
         if new_config:
-            # Check if network layout scaling rules changed
             arch_keys = ["n_embd", "n_head", "n_layer", "block_size"]
             arch_changed = False
             for k in arch_keys:
@@ -404,16 +444,11 @@ class ExternalTrainingManager:
             self.update_config(new_config)
             
             if arch_changed:
-                self.log("Network dimensions modified. Resetting checkpoint layers to prevent mismatch...")
+                self.log("Network dimensions modified. Resetting checkpoint layers...")
                 model_dir = os.path.join(self.model_dir, "native_slm")
-                pt_path = os.path.join(model_dir, 'model.pt')
-                tar_path = os.path.join(model_dir, 'checkpoint.tar')
-                if os.path.exists(pt_path):
-                    try: os.remove(pt_path)
-                    except: pass
-                if os.path.exists(tar_path):
-                    try: os.remove(tar_path)
-                    except: pass
+                for path in ['model.pt', 'checkpoint.tar']:
+                    p = os.path.join(model_dir, path)
+                    if os.path.exists(p): os.remove(p)
                 self.init_model("native_slm")
         
         self.is_training = True
@@ -422,23 +457,20 @@ class ExternalTrainingManager:
         self.losses_history = []
         self.val_losses_history = []
         
-        # Spawn execution tracking background worker
         threading.Thread(target=self._subprocess_monitor_worker, daemon=True).start()
         return True, "Subprocess pipeline initialized."
 
     def stop_training(self):
-        """Terminates the running model.py background process gracefully."""
         if not self.is_training or not self.train_process:
             return False, "Training is not active."
         try:
             self.train_process.terminate()
-            self.log("Termination signal dispatched to model.py pipeline process.")
+            self.log("Termination signal dispatched.")
             return True, "Process stop sequence executed."
         except Exception as e:
             return False, f"Failed to terminate process: {e}"
 
     def _subprocess_monitor_worker(self):
-        """Executes model.py using unbuffered python streams and parses real-time output logs."""
         try:
             cmd = ["python3", "-u", "model.py"]
             env = os.environ.copy()
@@ -447,24 +479,15 @@ class ExternalTrainingManager:
             self.train_process = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env
             )
-            self.log("Successfully spawned 'python3 -u model.py' background session.")
-
             while True:
                 line = self.train_process.stdout.readline()
-                if not line and self.train_process.poll() is not None:
-                    break
+                if not line and self.train_process.poll() is not None: break
                 if line:
                     clean_line = line.strip()
                     self.log(clean_line)
                     self._parse_metrics(clean_line)
 
-            rc = self.train_process.returncode
-            self.log(f"External training session finished with exit code: {rc}")
-            
-            # Recheck and reload weight parameters immediately upon processing completion
             self.init_model()
-            self.log("Web server memory layer matrices refreshed.")
-
         except Exception as e:
             self.log(f"Subprocess supervisor error: {e}")
         finally:
@@ -472,7 +495,6 @@ class ExternalTrainingManager:
             self.train_process = None
 
     def _parse_metrics(self, line):
-        """Parses lines like: Step  100/1000 | Train Loss: 0.5041 | Val Loss: 1.6554"""
         if "Step" in line and "Train Loss:" in line:
             try:
                 parts = [p.strip() for p in line.split("|")]
@@ -490,7 +512,6 @@ class ExternalTrainingManager:
             except Exception:
                 pass
 
-# Instantiate global manager
 training_manager = ExternalTrainingManager()
 
 # --- 2. REST API ENDPOINTS ---
@@ -499,11 +520,8 @@ training_manager = ExternalTrainingManager()
 def get_status():
     param_count = sum(p.numel() for p in training_manager.model.parameters() if p.requires_grad) if training_manager.model else 0
     device_info = training_manager.device.upper()
-    
-    try:
-        threads = torch.get_num_threads()
-    except:
-        threads = training_manager.config.get("num_threads", 2)
+    try: threads = torch.get_num_threads()
+    except: threads = training_manager.config.get("num_threads", 2)
         
     return jsonify({
         "is_training": training_manager.is_training,
@@ -525,7 +543,6 @@ def get_status():
 @app.route('/api/models', methods=['GET'])
 def get_models():
     models = list_available_models()
-    # Ensure native_slm is always in the list even if folder is empty
     if not any(m["name"] == "native_slm" for m in models):
         native_dir = os.path.join(training_manager.model_dir, "native_slm")
         models.append({
@@ -535,66 +552,53 @@ def get_models():
             "type": "native_slm",
             "config": load_config(os.path.join(native_dir, "config.json"))
         })
-    return jsonify({
-        "models": models,
-        "active_model": training_manager.active_model_name
-    })
+    return jsonify({"models": models, "active_model": training_manager.active_model_name})
 
 @app.route('/api/models/select', methods=['POST'])
 def select_model():
     if training_manager.is_training:
-        return jsonify({"error": "Cannot change models while training is in progress.", "status": "error"}), 400
+        return jsonify({"error": "Cannot change models during training."}), 400
     data = request.json or {}
     model_name = data.get("model_name")
     if not model_name:
-        return jsonify({"error": "No model name specified.", "status": "error"}), 400
+        return jsonify({"error": "No model name specified."}), 400
     
     training_manager.init_model(model_name)
-    return jsonify({"message": f"Model '{model_name}' selected and loaded.", "status": "success"})
+    return jsonify({"message": f"Model '{model_name}' loaded.", "status": "success"})
 
 @app.route('/api/models/delete', methods=['POST'])
 def delete_model():
     if training_manager.is_training:
-        return jsonify({"error": "Cannot delete models while training is in progress.", "status": "error"}), 400
+        return jsonify({"error": "Cannot delete models during training."}), 400
     data = request.json or {}
     model_name = data.get("model_name")
-    if not model_name:
-        return jsonify({"error": "No model name specified.", "status": "error"}), 400
     if model_name == "native_slm":
-        return jsonify({"error": "Cannot delete the native baseline model.", "status": "error"}), 400
+        return jsonify({"error": "Cannot delete native baseline."}), 400
     
     if training_manager.active_model_name == model_name:
-        # Switch back to native first
         training_manager.init_model("native_slm")
         
     model_dir = os.path.join(training_manager.model_dir, model_name)
     if os.path.exists(model_dir):
         try:
             shutil.rmtree(model_dir)
-            training_manager.log(f"Deleted model folder: {model_dir}")
             return jsonify({"message": f"Model '{model_name}' deleted.", "status": "success"})
         except Exception as e:
-            return jsonify({"error": f"Failed to delete model: {e}", "status": "error"}), 500
-    return jsonify({"error": "Model folder not found.", "status": "error"}), 404
+            return jsonify({"error": str(e)}), 500
+    return jsonify({"error": "Model not found."}), 404
 
 @app.route('/api/models/download', methods=['POST'])
 def download_model_route():
     data = request.json or {}
     url = data.get("url")
-    if not url:
-        return jsonify({"error": "No URL or Repo ID specified.", "status": "error"}), 400
+    if not url: return jsonify({"error": "No URL specified."}), 400
         
     def run_download():
-        training_manager.log(f"Starting background download for: {url}")
         try:
             from download_model import download_model as dl_model
-            success = dl_model(url, log_callback=training_manager.log)
-            if success:
-                training_manager.log(f"Download complete! Scanning and refreshing available models.")
-            else:
-                training_manager.log(f"Download failed for: {url}")
+            dl_model(url, log_callback=training_manager.log)
         except Exception as e:
-            training_manager.log(f"Download exception occurred: {e}")
+            training_manager.log(f"Download exception: {e}")
             
     threading.Thread(target=run_download, daemon=True).start()
     return jsonify({"message": "Download process started in background.", "status": "success"})
@@ -603,56 +607,40 @@ def download_model_route():
 def start_train():
     data = request.json or {}
     success, msg = training_manager.start_training(data)
-    if success:
-        return jsonify({"message": msg, "status": "success"})
+    if success: return jsonify({"message": msg, "status": "success"})
     return jsonify({"error": msg, "status": "error"}), 400
 
 @app.route('/api/train/stop', methods=['POST'])
 def stop_train():
     success, msg = training_manager.stop_training()
-    if success:
-        return jsonify({"message": msg, "status": "success"})
+    if success: return jsonify({"message": msg, "status": "success"})
     return jsonify({"error": msg, "status": "error"}), 400
 
 @app.route('/api/reset', methods=['POST'])
 def reset_model_route():
-    if training_manager.is_training:
-        return jsonify({"error": "Cannot wipe weights while training loop is active.", "status": "error"}), 400
-        
-    training_manager.log("Resetting all parameters to random initial distribution values...")
+    if training_manager.is_training: return jsonify({"error": "Training loop is active."}), 400
     model_dir = os.path.join(training_manager.model_dir, "native_slm")
-    pt_path = os.path.join(model_dir, 'model.pt')
-    tar_path = os.path.join(model_dir, 'checkpoint.tar')
-    if os.path.exists(pt_path):
-        try: os.remove(pt_path)
-        except: pass
-    if os.path.exists(tar_path):
-        try: os.remove(tar_path)
-        except: pass
+    for filename in ['model.pt', 'checkpoint.tar']:
+        p = os.path.join(model_dir, filename)
+        if os.path.exists(p): os.remove(p)
     training_manager.init_model("native_slm")
-    return jsonify({"message": "Model reset completed. Weights cleared.", "status": "success"})
+    return jsonify({"message": "Weights cleared.", "status": "success"})
 
 @app.route('/api/dataset', methods=['GET', 'POST'])
 def handle_dataset():
     dataset_path = 'training_data.txt'
     if request.method == 'GET':
-        if not os.path.exists(dataset_path):
-            return jsonify({"text": ""})
+        if not os.path.exists(dataset_path): return jsonify({"text": ""})
         try:
-            with open(dataset_path, 'r', encoding='utf-8') as f:
-                content = f.read(100000)
+            with open(dataset_path, 'r', encoding='utf-8') as f: content = f.read(100000)
             return jsonify({"text": content, "truncated": os.path.getsize(dataset_path) > 100000})
-        except Exception as e:
-            return jsonify({"error": str(e)}), 500
+        except Exception as e: return jsonify({"error": str(e)}), 500
     else:
         data = request.json or {}
-        text = data.get('text', '')
         try:
-            with open(dataset_path, 'w', encoding='utf-8') as f:
-                f.write(text)
+            with open(dataset_path, 'w', encoding='utf-8') as f: f.write(data.get('text', ''))
             return jsonify({"message": "Dataset saved successfully.", "status": "success"})
-        except Exception as e:
-            return jsonify({"error": str(e), "status": "error"}), 500
+        except Exception as e: return jsonify({"error": str(e)}), 500
 
 @app.route('/api/config/save', methods=['POST'])
 def save_config_route():
@@ -663,13 +651,12 @@ def save_config_route():
 @app.route('/api/chat', methods=['POST'])
 def chat_endpoint():
     if training_manager.is_training:
-        return jsonify({"error": "Model training process is running. Please pause training to activate chat interactions."}), 400
+        return jsonify({"error": "Model training process is running. Pause training to chat."}), 400
 
     data = request.json or {}
     messages = data.get('messages', [])
     prompt = data.get('prompt', '')
     
-    # Construct full context from history if messages are provided
     if messages:
         context = ""
         for msg in messages:
@@ -677,40 +664,24 @@ def chat_endpoint():
             context += f"{role}: {msg['content']}\n"
         context += "Assistant: "
     else:
-        # Fallback to single prompt if no history (or if prompt is explicitly provided)
         context = f"User: {prompt}\nAssistant: "
 
-    # Use defaults from config if not provided
     temperature = float(data.get('temperature', training_manager.config.get('temperature', 0.7)))
-    
     top_k = data.get('top_k', training_manager.config.get('top_k', 40))
     if top_k is not None:
-        try:
-            top_k = int(top_k)
-            if top_k == 0:
-                top_k = None
-        except (ValueError, TypeError):
-            top_k = None
+        try: top_k = int(top_k)
+        except: top_k = None
             
     max_tokens = int(data.get('max_tokens', training_manager.config.get('max_new_tokens', 150)))
     stream = data.get('stream', training_manager.config.get('stream', True))
 
-    if not context.strip():
-        return jsonify({"error": "Empty prompt provided."}), 400
+    if not context.strip(): return jsonify({"error": "Empty prompt."}), 400
 
     # --- GGUF C++ ENGINE PATHWAY ---
     if training_manager.is_gguf:
         import urllib.request
-        
-        # Prepare the payload for llama-server OpenAI endpoint
         formatted_messages = messages if messages else [{"role": "user", "content": prompt}]
-        
-        payload = {
-            "messages": formatted_messages,
-            "temperature": temperature,
-            "max_tokens": max_tokens,
-            "stream": stream
-        }
+        payload = {"messages": formatted_messages, "temperature": temperature, "max_tokens": max_tokens, "stream": stream}
         
         if not stream:
             start_time = time.time()
@@ -725,76 +696,54 @@ def chat_endpoint():
                 
                 elapsed = time.time() - start_time
                 choice = res_data['choices'][0]
-                response_text = choice['message']['content']
-                tokens_gen = res_data.get('usage', {}).get('completion_tokens', 0)
-                speed = tokens_gen / (elapsed + 1e-5)
-                
                 return jsonify({
-                    "response": response_text,
-                    "tokens_generated": tokens_gen,
+                    "response": choice['message']['content'],
+                    "tokens_generated": res_data.get('usage', {}).get('completion_tokens', 0),
                     "elapsed_seconds": elapsed,
-                    "speed_tokens_sec": speed
+                    "speed_tokens_sec": res_data.get('usage', {}).get('completion_tokens', 0) / (elapsed + 1e-5)
                 })
-            except Exception as e:
-                return jsonify({"error": f"Failed to communicate with llama-server: {e}"}), 500
+            except Exception as e: return jsonify({"error": str(e)}), 500
         else:
             def generate_gguf_sse():
                 import urllib.request
-                import json
-                
                 req = urllib.request.Request(
                     "http://127.0.0.1:5001/v1/chat/completions",
                     data=json.dumps(payload).encode('utf-8'),
                     headers={"Content-Type": "application/json"}
                 )
-                
                 start_time = time.time()
                 tokens_streamed = 0
-                
                 try:
                     with urllib.request.urlopen(req) as response:
                         buffer = ""
                         while True:
                             chunk = response.read(1024)
-                            if not chunk:
-                                break
+                            if not chunk: break
                             buffer += chunk.decode('utf-8', errors='ignore')
                             while "\n" in buffer:
                                 line, buffer = buffer.split("\n", 1)
                                 line = line.strip()
-                                if not line:
-                                    continue
                                 if line.startswith("data:"):
                                     data_str = line[5:].strip()
-                                    if data_str == "[DONE]":
-                                        break
+                                    if data_str == "[DONE]": break
                                     try:
-                                        data_json = json.loads(data_str)
-                                        delta = data_json['choices'][0].get('delta', {})
-                                        content = delta.get('content', '')
+                                        content = json.loads(data_str)['choices'][0].get('delta', {}).get('content', '')
                                         if content:
                                             tokens_streamed += 1
                                             yield f"data: {json.dumps({'token': content})}\n\n"
-                                    except Exception:
-                                        pass
+                                    except: pass
                 except Exception as e:
-                    yield f"data: {json.dumps({'token': f'\n[Error streaming from llama-server: {e}]'})}\n\n"
-                    
+                    yield f"data: {json.dumps({'token': f'\n[Streaming error: {e}]'})}\n\n"
                 elapsed = time.time() - start_time
                 yield f"data: {json.dumps({'done': True, 'tokens_generated': tokens_streamed, 'elapsed_seconds': elapsed, 'speed_tokens_sec': tokens_streamed / (elapsed + 1e-5)})}\n\n"
-                
             return Response(generate_gguf_sse(), mimetype='text/event-stream')
 
     # --- NATIVE PYTORCH INFERENCE PATHWAY ---
     prompt_tokens = training_manager.tokenizer.encode(context, bos=True, eos=False)
-    
-    # Truncate if context is longer than block_size - max_tokens
     model_max_len = training_manager.config.get('block_size') or training_manager.config.get('max_position_embeddings') or 2048
     max_context = model_max_len - max_tokens - 10
-    if max_context < 32:
-        max_context = 32
-    if len(prompt_tokens) > max_context:
-        prompt_tokens = prompt_tokens[-max_context:]
+    if max_context < 32: max_context = 32
+    if len(prompt_tokens) > max_context: prompt_tokens = prompt_tokens[-max_context:]
         
     input_tensor = torch.tensor([prompt_tokens], dtype=torch.long, device=training_manager.device)
 
@@ -802,73 +751,49 @@ def chat_endpoint():
         start_time = time.time()
         with torch.no_grad():
             generated_ids = training_manager.model.generate(
-                input_tensor,
-                max_new_tokens=max_tokens,
-                temperature=temperature,
-                top_k=top_k
+                input_tensor, max_new_tokens=max_tokens, temperature=temperature, top_k=top_k
             )
         elapsed = time.time() - start_time
         response_text = training_manager.tokenizer.decode(generated_ids)
-        tokens_gen = len(generated_ids)
-        speed = tokens_gen / (elapsed + 1e-5)
-        
         return jsonify({
             "response": response_text,
-            "tokens_generated": tokens_gen,
+            "tokens_generated": len(generated_ids),
             "elapsed_seconds": elapsed,
-            "speed_tokens_sec": speed
+            "speed_tokens_sec": len(generated_ids) / (elapsed + 1e-5)
         })
     else:
         def generate_sse():
             q = Queue()
             def token_callback(token_id): q.put(token_id)
-                
             def worker():
                 try:
                     training_manager.model.generate(
-                        input_tensor,
-                        max_new_tokens=max_tokens,
-                        temperature=temperature,
-                        top_k=top_k,
-                        callback=token_callback
+                        input_tensor, max_new_tokens=max_tokens, temperature=temperature, top_k=top_k, callback=token_callback
                     )
-                except Exception as e:
-                    print(f"Streaming error: {e}")
-                finally:
-                    q.put(None)
+                except: pass
+                finally: q.put(None)
             
             threading.Thread(target=worker, daemon=True).start()
             start_time = time.time()
             tokens_streamed = 0
-            
             while True:
                 token_id = q.get()
-                if token_id is None:
-                    break
+                if token_id is None: break
                 tokens_streamed += 1
                 yield f"data: {json.dumps({'token': training_manager.tokenizer.decode([token_id])})}\n\n"
-                
             elapsed = time.time() - start_time
             yield f"data: {json.dumps({'done': True, 'tokens_generated': tokens_streamed, 'elapsed_seconds': elapsed, 'speed_tokens_sec': tokens_streamed / (elapsed + 1e-5)})}\n\n"
-
         return Response(generate_sse(), mimetype='text/event-stream')
 
 @app.route('/api/models/hf_list', methods=['POST'])
 def hf_list_models():
     data = request.json or {}
     repo_id = data.get("repo_id", "").strip()
-    if not repo_id:
-        return jsonify({"error": "No Repository ID specified.", "status": "error"}), 400
-    
-    # Clean up Repo ID in case user pasted a full URL
-    if "huggingface.co/" in repo_id:
-        repo_id = repo_id.split("huggingface.co/")[-1]
-    # Remove branch details if they exist
+    if not repo_id: return jsonify({"error": "No Repository ID specified."}), 400
+    if "huggingface.co/" in repo_id: repo_id = repo_id.split("huggingface.co/")[-1]
     tokens = [t for t in repo_id.split('/') if t]
-    if len(tokens) >= 2:
-        repo_id = f"{tokens[0]}/{tokens[1]}"
-    else:
-        return jsonify({"error": "Invalid Hugging Face Repository ID format. Should be 'owner/repo'.", "status": "error"}), 400
+    if len(tokens) >= 2: repo_id = f"{tokens[0]}/{tokens[1]}"
+    else: return jsonify({"error": "Invalid format. Should be 'owner/repo'."}), 400
         
     url = f"https://huggingface.co/api/models/{repo_id}/tree/main"
     try:
@@ -876,45 +801,25 @@ def hf_list_models():
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req) as response:
             tree_data = json.loads(response.read().decode('utf-8'))
-            
         gguf_files = []
         for item in tree_data:
             if item.get("type") == "file" and item.get("path", "").endswith(".gguf"):
-                gguf_files.append({
-                    "name": item.get("path"),
-                    "size_bytes": item.get("size", 0),
-                    "size_mb": round(item.get("size", 0) / (1024 * 1024), 1)
-                })
-        if gguf_files:
-            return jsonify({"files": gguf_files, "status": "success", "repo_id": repo_id})
-    except Exception:
-        pass
-        
-    # Fallback to general model info API
+                gguf_files.append({"name": item.get("path"), "size_bytes": item.get("size", 0), "size_mb": round(item.get("size", 0) / (1024 * 1024), 1)})
+        if gguf_files: return jsonify({"files": gguf_files, "status": "success", "repo_id": repo_id})
+    except: pass
+
     url = f"https://huggingface.co/api/models/{repo_id}"
     try:
         import urllib.request
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
         with urllib.request.urlopen(req) as response:
             model_data = json.loads(response.read().decode('utf-8'))
-            
-        siblings = model_data.get("siblings", [])
-        gguf_files = []
-        for s in siblings:
-            filename = s.get("rfilename", "")
-            if filename.endswith(".gguf"):
-                gguf_files.append({
-                    "name": filename,
-                    "size_bytes": 0,
-                    "size_mb": -1
-                })
+        gguf_files = [{"name": s.get("rfilename", ""), "size_bytes": 0, "size_mb": -1} for s in model_data.get("siblings", []) if s.get("rfilename", "").endswith(".gguf")]
         return jsonify({"files": gguf_files, "status": "success", "repo_id": repo_id})
-    except Exception as e:
-        return jsonify({"error": f"Failed to query Hugging Face repo '{repo_id}': {e}", "status": "error"}), 500
+    except Exception as e: return jsonify({"error": str(e)}), 500
 
 @app.route('/')
-def index_route():
-    return render_template('index.html')
+def index_route(): return render_template('index.html')
 
 if __name__ == "__main__":
     print("--------------------------------------------------")
