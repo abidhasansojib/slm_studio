@@ -86,7 +86,7 @@ def convert_to_gguf(input_path, out_path, config_src=None):
         else:
             print("[!] Source config not found. Using defaults.")
             config = {
-                "n_embd": 128, "n_head": 4, "n_layer": 4, "block_size": 128, "vocab_size": 259
+                "n_embd": 128, "n_head": 4, "n_layer": 2, "block_size": 128, "vocab_size": 259
             }
 
         # Determine architecture and map keys
@@ -222,6 +222,28 @@ def convert_to_gguf(input_path, out_path, config_src=None):
         
         print(f"[+] Success! GGUF model saved as {out_path}")
         
+        # --- NEW: AUTOMATIC QUANTIZATION ---
+        quant_path = out_path.replace(".gguf", "-Q4_K_M.gguf")
+        print(f"[*] Attempting automatic quantization to Q4_K_M: {quant_path}...")
+        
+        # Check if llama-quantize is available
+        import subprocess
+        try:
+            # Q4_K_M is the mobile sweet spot: fast, low RAM, and high quality.
+            result = subprocess.run(["llama-quantize", out_path, quant_path, "Q4_K_M"], 
+                                     capture_output=True, text=True)
+            if result.returncode == 0:
+                print(f"[+] Quantization successful: {quant_path}")
+            else:
+                # Fallback to Q8_0 if Q4_K_M fails for some reason
+                quant_path_alt = out_path.replace(".gguf", "-Q8_0.gguf")
+                print(f"[*] Q4_K_M failed, trying Q8_0: {quant_path_alt}...")
+                subprocess.run(["llama-quantize", out_path, quant_path_alt, "Q8_0"])
+        except FileNotFoundError:
+            print("[-] 'llama-quantize' not found in PATH. Skipping quantization.")
+        except Exception as e:
+            print(f"[-] An error occurred during quantization: {e}")
+            
     except Exception as e:
         print(f"[-] Conversion error: {e}")
         import traceback

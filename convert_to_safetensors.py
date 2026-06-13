@@ -115,10 +115,10 @@ def convert_to_safetensors(pt_path, out_path, config_src="models/native_slm/conf
         else:
             print("[!] Source config not found. Generating default native config...")
             config_data = {
-                "n_embd": 256,
-                "n_head": 8,
-                "n_layer": 6,
-                "block_size": 384,
+                "n_embd": 128,
+                "n_head": 4,
+                "n_layer": 2,
+                "block_size": 128,
                 "vocab_size": 259
             }
         

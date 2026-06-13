@@ -4,7 +4,8 @@ import json
 import threading
 import subprocess
 import shutil
-import codecs
+import signal
+import sys
 from queue import Queue
 import torch
 from flask import Flask, request, jsonify, Response, render_template
@@ -46,7 +47,6 @@ def list_available_models():
     # 2. Search for directories inside models/
     for entry in os.scandir(model_dir):
         if entry.is_dir():
-            # Check if there is any .gguf file inside this subdirectory
             try:
                 gguf_files = [f.name for f in os.scandir(entry.path) if f.is_file() and f.name.endswith(".gguf")]
             except:
@@ -54,7 +54,6 @@ def list_available_models():
                 
             if gguf_files:
                 for gf in gguf_files:
-                    # If multiple gguf files in the same directory, give them distinct names
                     name = f"{entry.name}/{gf}" if len(gguf_files) > 1 else entry.name
                     models.append({
                         "name": name,
@@ -123,7 +122,15 @@ class ExternalTrainingManager:
         self.init_model()
         
         import atexit
-        atexit.register(self.stop_llama_server)
+        atexit.register(self.shutdown)
+        try:
+            signal.signal(signal.SIGINT, self._signal_handler)
+            signal.signal(signal.SIGTERM, self._signal_handler)
+        except: pass
+
+    def _signal_handler(self, sig, frame):
+        self.shutdown()
+        sys.exit(0)
 
     def stop_llama_server(self):
         """Terminates the running llama-server background process gracefully."""
@@ -142,6 +149,22 @@ class ExternalTrainingManager:
             except Exception as e:
                 self.log(f"Error terminating llama-server: {e}")
             self.llama_process = None
+
+        # Clean up any remaining processes on port 5001
+        try:
+            pids = subprocess.check_output(["lsof", "-t", "-i", ":5001"], stderr=subprocess.DEVNULL).decode().split()
+            for p in pids:
+                pid = int(p)
+                if pid != os.getpid():
+                    os.kill(pid, 9)
+        except Exception:
+            pass
+
+    def shutdown(self):
+        self.stop_training()
+        self.stop_llama_server()
+        os.system("pkill -9 -f llama-cli >/dev/null 2>&1 || true")
+        os.system("pkill -9 -f llama-server >/dev/null 2>&1 || true")
 
     def init_model(self, model_name=None):
         """Initializes the PyTorch model or GGUF llama-server subprocess."""
@@ -187,9 +210,15 @@ class ExternalTrainingManager:
             
             if model_info["type"] == "gguf":
                 self.is_gguf = True
-                self.config = model_info["config"]
+                self.config = load_config()
+                if model_info.get("config"):
+                    self.config.update(model_info["config"])
                 self.tokenizer = None
                 self.model = None
+                
+                # Unload PyTorch weights from Python memory to free RAM
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
                 
                 weights_path = os.path.join(model_dir, model_info["weights_file"]) if model_dir != "models" else os.path.join("models", model_info["weights_file"])
                 self.log(f"Active model is a quantized GGUF. Starting C++ engine llama-server...")
@@ -201,7 +230,7 @@ class ExternalTrainingManager:
                     s.connect(("127.0.0.1", 5001))
                     s.close()
                     self.log("[!] Port 5001 is already in use. Cleaning up...")
-                    os.system("fuser -k 5001/tcp >/dev/null 2>&1 || pkill -f llama-server >/dev/null 2>&1 || true")
+                    os.system("fuser -k 5001/tcp >/dev/null 2>&1 || true")
                     time.sleep(0.5)
                 except Exception:
                     pass
@@ -221,9 +250,9 @@ class ExternalTrainingManager:
                 self.llama_process = subprocess.Popen(
                     cmd,
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,  # Combine stdout and stderr to prevent block
+                    stderr=subprocess.STDOUT,
                     text=True,
-                    bufsize=1  # Line buffered
+                    bufsize=1
                 )
                 
                 # Spawn non-blocking background reader thread to prevent pipe buffer from freezing
@@ -240,12 +269,30 @@ class ExternalTrainingManager:
                 
                 threading.Thread(target=log_reader, args=(self.llama_process, self), daemon=True).start()
                 
-                # Verify server startup
-                time.sleep(2.5)
-                if self.llama_process.poll() is not None:
-                    raise RuntimeError("llama-server failed to launch. Check the log statements above for details.")
+                # Verify server startup and wait for model loading to complete (preventing HTTP 503 Service Unavailable errors)
+                self.log("Waiting for llama-server to initialize and load model weights...")
+                ready = False
+                for i in range(120):  # Try for up to 60 seconds (useful for slower mobile CPUs/storage)
+                    time.sleep(0.5)
+                    if self.llama_process.poll() is not None:
+                        raise RuntimeError("llama-server terminated unexpectedly during startup.")
+                    
+                    try:
+                        import urllib.request
+                        req = urllib.request.Request("http://127.0.0.1:5001/health")
+                        with urllib.request.urlopen(req, timeout=1.0) as response:
+                            if response.status == 200:
+                                res_data = json.loads(response.read().decode('utf-8'))
+                                if res_data.get("status") == "ok":
+                                    ready = True
+                                    break
+                    except Exception:
+                        pass
                 
-                self.log("llama-server successfully started in the background on port 5001!")
+                if not ready:
+                    raise RuntimeError("llama-server failed to become ready within 60 seconds.")
+                
+                self.log("llama-server successfully started and model is fully loaded on port 5001!")
                 with open("server_config.json", "w") as f:
                     json.dump({"active_model": model_name}, f)
                 return
@@ -308,21 +355,13 @@ class ExternalTrainingManager:
                 ).to(model_dtype).to(self.device)
                 
             if state_dict:
-                # Identify common prefixes and strip them if they don't match our model's keys
-                model_keys = set(self.model.state_dict().keys())
-                state_keys = set(state_dict.keys())
-                
-                if not any(k in model_keys for k in state_keys):
-                    for prefix in ["model.", "transformer.", "base_model.model.", "llm.", "vision_tower.model."]:
-                        if any(k.startswith(prefix) for k in state_keys):
-                            self.log(f"Adjusting state_dict keys (stripping '{prefix}' prefix)...")
-                            state_dict = { (k[len(prefix):] if k.startswith(prefix) else k): v for k, v in state_dict.items() }
-                            state_keys = set(state_dict.keys())
-                            if any(k in model_keys for k in state_keys):
-                                break
+                m_keys = set(self.model.state_dict().keys())
+                for prefix in ["model.", "transformer.", "llm."]:
+                    if not any(k in m_keys for k in state_dict.keys()):
+                        state_dict = { (k[len(prefix):] if k.startswith(prefix) else k): v for k, v in state_dict.items() }
                 
                 # Cast state_dict tensors to model_dtype to ensure clean loading
-                state_dict = {k: v.to(model_dtype) for k, v in state_dict.items() if k in model_keys}
+                state_dict = {k: v.to(model_dtype) for k, v in state_dict.items() if k in m_keys}
                 
                 self.model.load_state_dict(state_dict, strict=False)
                 self.model.eval()
@@ -350,18 +389,15 @@ class ExternalTrainingManager:
         if msg_str.startswith('\r'):
             clean_msg = msg_str.replace('\r', '').strip()
             if clean_msg and self.logs:
-                # Update the last log entry if it looks like a progress line
                 timestamp = time.strftime("%H:%M:%S")
                 self.logs[-1] = f"[{timestamp}] {clean_msg}"
             elif clean_msg:
                 timestamp = time.strftime("%H:%M:%S")
                 self.logs.append(f"[{timestamp}] {clean_msg}")
             
-            # Also print to terminal
             print(msg_str, end=kwargs.get('end', '\n'), flush=True)
             return
 
-        # Ignore empty/whitespace-only messages (often just for terminal newlines)
         if not msg_str.strip():
             print(msg_str, end=kwargs.get('end', '\n'), flush=True)
             return
@@ -376,6 +412,11 @@ class ExternalTrainingManager:
 
     def update_config(self, new_config):
         """Helper to update internal config and save to disk."""
+        restart_needed = False
+        if self.is_gguf:
+            old_block_size = self.config.get("block_size")
+            old_threads = self.config.get("num_threads")
+            
         for k, v in new_config.items():
             if isinstance(v, bool):
                 self.config[k] = bool(v)
@@ -389,11 +430,22 @@ class ExternalTrainingManager:
                 except ValueError:
                     self.config[k] = v
                     
+        if self.is_gguf:
+            new_block_size = self.config.get("block_size")
+            new_threads = self.config.get("num_threads")
+            if old_block_size != new_block_size or old_threads != new_threads:
+                restart_needed = True
+
         # Save config to the active model's directory
         model_dir = os.path.join(self.model_dir, self.active_model_name)
         if os.path.exists(model_dir):
             config_path = os.path.join(model_dir, "config.json")
             save_config(self.config, config_path)
+        save_config(self.config, "model_config.json")
+        
+        if restart_needed:
+            self.log("Configuration updated. Restarting llama-server with new settings...")
+            self.init_model(self.active_model_name)
 
     def start_training(self, new_config=None):
         """Updates configurations and executes model.py as an isolated pipeline."""
@@ -442,6 +494,7 @@ class ExternalTrainingManager:
             return False, "Training is not active."
         try:
             self.train_process.terminate()
+            os.system("pkill -f 'python3 -u model.py' >/dev/null 2>&1 || true")
             self.log("Termination signal dispatched to model.py pipeline process.")
             return True, "Process stop sequence executed."
         except Exception as e:
@@ -483,53 +536,52 @@ class ExternalTrainingManager:
 
     def _parse_metrics(self, line):
         """Parses lines like: Step  100/1000 | Train Loss: 0.5041 | Val Loss: 1.6554"""
-        if "Step" in line and "Train Loss:" in line:
+        if "Step" in line and "Loss:" in line:
             try:
                 parts = [p.strip() for p in line.split("|")]
                 step_str = parts[0].replace("Step", "").split("/")[0].strip()
                 self.current_step = int(step_str)
                 
-                loss_str = parts[1].replace("Train Loss:", "").strip()
+                loss_str = parts[1].split(":")[1].strip()
                 self.current_loss = float(loss_str)
                 self.losses_history.append({"step": self.current_step, "loss": self.current_loss})
                 
                 if len(parts) > 2 and "Val Loss:" in parts[2]:
-                    val_str = parts[2].replace("Val Loss:", "").strip()
+                    val_str = parts[2].split(":")[1].strip()
                     self.val_loss = float(val_str)
                     self.val_losses_history.append({"step": self.current_step, "loss": self.val_loss})
             except Exception:
                 pass
 
 # Instantiate global manager
-training_manager = ExternalTrainingManager()
+manager = ExternalTrainingManager()
 
 # --- 2. REST API ENDPOINTS ---
 
 @app.route('/api/status', methods=['GET'])
 def get_status():
-    param_count = sum(p.numel() for p in training_manager.model.parameters() if p.requires_grad) if training_manager.model else 0
-    device_info = training_manager.device.upper()
+    param_count = sum(p.numel() for p in manager.model.parameters() if p.requires_grad) if manager.model else 0
+    device_info = manager.device.upper()
     
     try:
         threads = torch.get_num_threads()
     except:
-        threads = training_manager.config.get("num_threads", 2)
+        threads = manager.config.get("num_threads", 2)
         
     return jsonify({
-        "is_training": training_manager.is_training,
-        "current_step": training_manager.current_step,
-        "total_steps": training_manager.total_steps,
-        "current_loss": training_manager.current_loss,
-        "val_loss": training_manager.val_loss,
-        "losses_history": training_manager.losses_history,
-        "val_losses_history": training_manager.val_losses_history,
-        "logs": training_manager.logs[-80:], 
+        "is_training": manager.is_training,
+        "current_step": manager.current_step,
+        "total_steps": manager.total_steps,
+        "current_loss": manager.current_loss,
+        "val_loss": manager.val_loss,
+        "losses_history": manager.losses_history,
+        "val_losses_history": manager.val_losses_history,
+        "logs": manager.logs[-80:], 
         "device": device_info,
         "param_count": param_count,
         "threads": threads,
-        "config": training_manager.config,
-        "active_engine": "pytorch",
-        "active_model": training_manager.active_model_name
+        "config": manager.config,
+        "active_model": manager.active_model_name
     })
 
 @app.route('/api/models', methods=['GET'])
@@ -537,7 +589,7 @@ def get_models():
     models = list_available_models()
     # Ensure native_slm is always in the list even if folder is empty
     if not any(m["name"] == "native_slm" for m in models):
-        native_dir = os.path.join(training_manager.model_dir, "native_slm")
+        native_dir = os.path.join(manager.model_dir, "native_slm")
         models.append({
             "name": "native_slm",
             "path": native_dir,
@@ -547,24 +599,24 @@ def get_models():
         })
     return jsonify({
         "models": models,
-        "active_model": training_manager.active_model_name
+        "active_model": manager.active_model_name
     })
 
 @app.route('/api/models/select', methods=['POST'])
 def select_model():
-    if training_manager.is_training:
+    if manager.is_training:
         return jsonify({"error": "Cannot change models while training is in progress.", "status": "error"}), 400
     data = request.json or {}
     model_name = data.get("model_name")
     if not model_name:
         return jsonify({"error": "No model name specified.", "status": "error"}), 400
     
-    training_manager.init_model(model_name)
+    manager.init_model(model_name)
     return jsonify({"message": f"Model '{model_name}' selected and loaded.", "status": "success"})
 
 @app.route('/api/models/delete', methods=['POST'])
 def delete_model():
-    if training_manager.is_training:
+    if manager.is_training:
         return jsonify({"error": "Cannot delete models while training is in progress.", "status": "error"}), 400
     data = request.json or {}
     model_name = data.get("model_name")
@@ -573,19 +625,31 @@ def delete_model():
     if model_name == "native_slm":
         return jsonify({"error": "Cannot delete the native baseline model.", "status": "error"}), 400
     
-    if training_manager.active_model_name == model_name:
+    if manager.active_model_name == model_name:
         # Switch back to native first
-        training_manager.init_model("native_slm")
+        manager.init_model("native_slm")
         
-    model_dir = os.path.join(training_manager.model_dir, model_name)
-    if os.path.exists(model_dir):
-        try:
-            shutil.rmtree(model_dir)
-            training_manager.log(f"Deleted model folder: {model_dir}")
-            return jsonify({"message": f"Model '{model_name}' deleted.", "status": "success"})
-        except Exception as e:
-            return jsonify({"error": f"Failed to delete model: {e}", "status": "error"}), 500
-    return jsonify({"error": "Model folder not found.", "status": "error"}), 404
+    models = list_available_models()
+    info = next((m for m in models if m["name"] == model_name), None)
+    if not info:
+        return jsonify({"error": "Model not found.", "status": "error"}), 404
+        
+    try:
+        target_path = os.path.abspath(info["path"])
+        models_dir = os.path.abspath("models")
+        if not target_path.startswith(models_dir):
+            return jsonify({"error": "Invalid model path.", "status": "error"}), 400
+            
+        if os.path.isfile(target_path):
+            os.remove(target_path)
+            manager.log(f"Deleted GGUF model file: {target_path}")
+        elif os.path.isdir(target_path):
+            shutil.rmtree(target_path)
+            manager.log(f"Deleted model folder: {target_path}")
+            
+        return jsonify({"message": f"Model '{model_name}' deleted.", "status": "success"})
+    except Exception as e:
+        return jsonify({"error": f"Failed to delete model: {e}", "status": "error"}), 500
 
 @app.route('/api/models/download', methods=['POST'])
 def download_model_route():
@@ -595,16 +659,16 @@ def download_model_route():
         return jsonify({"error": "No URL or Repo ID specified.", "status": "error"}), 400
         
     def run_download():
-        training_manager.log(f"Starting background download for: {url}")
+        manager.log(f"Starting background download for: {url}")
         try:
             from download_model import download_model as dl_model
-            success = dl_model(url, log_callback=training_manager.log)
+            success = dl_model(url, log_callback=manager.log)
             if success:
-                training_manager.log(f"Download complete! Scanning and refreshing available models.")
+                manager.log(f"Download complete! Scanning and refreshing available models.")
             else:
-                training_manager.log(f"Download failed for: {url}")
+                manager.log(f"Download failed for: {url}")
         except Exception as e:
-            training_manager.log(f"Download exception occurred: {e}")
+            manager.log(f"Download exception occurred: {e}")
             
     threading.Thread(target=run_download, daemon=True).start()
     return jsonify({"message": "Download process started in background.", "status": "success"})
@@ -612,25 +676,25 @@ def download_model_route():
 @app.route('/api/train/start', methods=['POST'])
 def start_train():
     data = request.json or {}
-    success, msg = training_manager.start_training(data)
+    success, msg = manager.start_training(data)
     if success:
         return jsonify({"message": msg, "status": "success"})
     return jsonify({"error": msg, "status": "error"}), 400
 
 @app.route('/api/train/stop', methods=['POST'])
 def stop_train():
-    success, msg = training_manager.stop_training()
+    success, msg = manager.stop_training()
     if success:
         return jsonify({"message": msg, "status": "success"})
     return jsonify({"error": msg, "status": "error"}), 400
 
 @app.route('/api/reset', methods=['POST'])
 def reset_model_route():
-    if training_manager.is_training:
+    if manager.is_training:
         return jsonify({"error": "Cannot wipe weights while training loop is active.", "status": "error"}), 400
         
-    training_manager.log("Resetting all parameters to random initial distribution values...")
-    model_dir = os.path.join(training_manager.model_dir, "native_slm")
+    manager.log("Resetting all parameters to random initial distribution values...")
+    model_dir = os.path.join(manager.model_dir, "native_slm")
     pt_path = os.path.join(model_dir, 'model.pt')
     tar_path = os.path.join(model_dir, 'checkpoint.tar')
     if os.path.exists(pt_path):
@@ -639,7 +703,7 @@ def reset_model_route():
     if os.path.exists(tar_path):
         try: os.remove(tar_path)
         except: pass
-    training_manager.init_model("native_slm")
+    manager.init_model("native_slm")
     return jsonify({"message": "Model reset completed. Weights cleared.", "status": "success"})
 
 @app.route('/api/dataset', methods=['GET', 'POST'])
@@ -667,12 +731,12 @@ def handle_dataset():
 @app.route('/api/config/save', methods=['POST'])
 def save_config_route():
     data = request.json or {}
-    training_manager.update_config(data)
+    manager.update_config(data)
     return jsonify({"message": "Configuration saved successfully.", "status": "success"})
 
 @app.route('/api/chat', methods=['POST'])
 def chat_endpoint():
-    if training_manager.is_training:
+    if manager.is_training:
         return jsonify({"error": "Model training process is running. Please pause training to activate chat interactions."}), 400
 
     data = request.json or {}
@@ -691,9 +755,9 @@ def chat_endpoint():
         context = f"User: {prompt}\nAssistant: "
 
     # Use defaults from config if not provided
-    temperature = float(data.get('temperature', training_manager.config.get('temperature', 0.7)))
+    temperature = float(data.get('temperature', manager.config.get('temperature', 0.7)))
     
-    top_k = data.get('top_k', training_manager.config.get('top_k', 40))
+    top_k = data.get('top_k', manager.config.get('top_k', 40))
     if top_k is not None:
         try:
             top_k = int(top_k)
@@ -702,14 +766,21 @@ def chat_endpoint():
         except (ValueError, TypeError):
             top_k = None
             
-    max_tokens = int(data.get('max_tokens', training_manager.config.get('max_new_tokens', 150)))
-    stream = data.get('stream', training_manager.config.get('stream', True))
+    max_tokens = int(data.get('max_tokens', manager.config.get('max_new_tokens', 150)))
+    stream = data.get('stream', manager.config.get('stream', True))
 
     if not context.strip():
         return jsonify({"error": "Empty prompt provided."}), 400
 
     # --- GGUF C++ ENGINE PATHWAY ---
-    if training_manager.is_gguf:
+    if manager.is_gguf:
+        if not manager.llama_process or manager.llama_process.poll() is not None:
+            manager.log("llama-server process not running. Re-initializing model to start it...")
+            manager.init_model(manager.active_model_name)
+            
+        if not manager.llama_process or manager.llama_process.poll() is not None:
+            return jsonify({"error": "Failed to start llama-server. Check server logs."}), 500
+
         import urllib.request
         
         # Prepare the payload for llama-server OpenAI endpoint
@@ -721,16 +792,17 @@ def chat_endpoint():
             "max_tokens": max_tokens,
             "stream": stream
         }
-
-        req = urllib.request.Request(
-            "http://127.0.0.1:5001/v1/chat/completions",
-            data=json.dumps(payload).encode('utf-8'),
-            headers={"Content-Type": "application/json"}
-        )
+        if top_k is not None:
+            payload["top_k"] = top_k
         
         if not stream:
             start_time = time.time()
             try:
+                req = urllib.request.Request(
+                    "http://127.0.0.1:5001/v1/chat/completions",
+                    data=json.dumps(payload).encode('utf-8'),
+                    headers={"Content-Type": "application/json"}
+                )
                 with urllib.request.urlopen(req) as response:
                     res_data = json.loads(response.read().decode('utf-8'))
                 
@@ -747,21 +819,30 @@ def chat_endpoint():
                     "speed_tokens_sec": speed
                 })
             except Exception as e:
+                manager.log(f"Failed to communicate with llama-server: {e}")
                 return jsonify({"error": f"Failed to communicate with llama-server: {e}"}), 500
         else:
             def generate_gguf_sse():
+                import urllib.request
+                import json
+                
+                req = urllib.request.Request(
+                    "http://127.0.0.1:5001/v1/chat/completions",
+                    data=json.dumps(payload).encode('utf-8'),
+                    headers={"Content-Type": "application/json"}
+                )
+                
                 start_time = time.time()
                 tokens_streamed = 0
                 
                 try:
-                    decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
                     with urllib.request.urlopen(req) as response:
                         buffer = ""
                         while True:
                             chunk = response.read(1024)
                             if not chunk:
                                 break
-                            buffer += decoder.decode(chunk)
+                            buffer += chunk.decode('utf-8', errors='ignore')
                             while "\n" in buffer:
                                 line, buffer = buffer.split("\n", 1)
                                 line = line.strip()
@@ -789,29 +870,29 @@ def chat_endpoint():
             return Response(generate_gguf_sse(), mimetype='text/event-stream')
 
     # --- NATIVE PYTORCH INFERENCE PATHWAY ---
-    prompt_tokens = training_manager.tokenizer.encode(context, bos=True, eos=False)
+    prompt_tokens = manager.tokenizer.encode(context, bos=True, eos=False)
     
     # Truncate if context is longer than block_size - max_tokens
-    model_max_len = training_manager.config.get('block_size') or training_manager.config.get('max_position_embeddings') or 2048
+    model_max_len = manager.config.get('block_size') or manager.config.get('max_position_embeddings') or 2048
     max_context = model_max_len - max_tokens - 10
     if max_context < 32:
         max_context = 32
     if len(prompt_tokens) > max_context:
         prompt_tokens = prompt_tokens[-max_context:]
         
-    input_tensor = torch.tensor([prompt_tokens], dtype=torch.long, device=training_manager.device)
+    input_tensor = torch.tensor([prompt_tokens], dtype=torch.long, device=manager.device)
 
     if not stream:
         start_time = time.time()
         with torch.no_grad():
-            generated_ids = training_manager.model.generate(
+            generated_ids = manager.model.generate(
                 input_tensor,
                 max_new_tokens=max_tokens,
                 temperature=temperature,
                 top_k=top_k
             )
         elapsed = time.time() - start_time
-        response_text = training_manager.tokenizer.decode(generated_ids)
+        response_text = manager.tokenizer.decode(generated_ids)
         tokens_gen = len(generated_ids)
         speed = tokens_gen / (elapsed + 1e-5)
         
@@ -828,13 +909,12 @@ def chat_endpoint():
                 
             def worker():
                 try:
-                    training_manager.model.generate(
+                    manager.model.generate(
                         input_tensor,
                         max_new_tokens=max_tokens,
                         temperature=temperature,
                         top_k=top_k,
-                        callback=token_callback,
-                        eos_id=training_manager.tokenizer.eos_token
+                        callback=token_callback
                     )
                 except Exception as e:
                     print(f"Streaming error: {e}")
@@ -850,7 +930,7 @@ def chat_endpoint():
                 if token_id is None:
                     break
                 tokens_streamed += 1
-                yield f"data: {json.dumps({'token': training_manager.tokenizer.decode([token_id])})}\n\n"
+                yield f"data: {json.dumps({'token': manager.tokenizer.decode([token_id])})}\n\n"
                 
             elapsed = time.time() - start_time
             yield f"data: {json.dumps({'done': True, 'tokens_generated': tokens_streamed, 'elapsed_seconds': elapsed, 'speed_tokens_sec': tokens_streamed / (elapsed + 1e-5)})}\n\n"
@@ -921,6 +1001,22 @@ def index_route():
     return render_template('index.html')
 
 if __name__ == "__main__":
+    # Clean up port 5000 and 5001 bindings
+    try:
+        pids = subprocess.check_output(["lsof", "-t", "-i", ":5000"], stderr=subprocess.DEVNULL).decode().split()
+        for p in pids:
+            if int(p) != os.getpid(): 
+                os.kill(int(p), 9)
+    except: 
+        pass
+    try:
+        pids = subprocess.check_output(["lsof", "-t", "-i", ":5001"], stderr=subprocess.DEVNULL).decode().split()
+        for p in pids:
+            if int(p) != os.getpid(): 
+                os.kill(int(p), 9)
+    except: 
+        pass
+    
     print("--------------------------------------------------")
     print("   Native Termux SLM Server (Dual-Engine Monitor) ")
     print("--------------------------------------------------")

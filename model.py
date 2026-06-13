@@ -8,17 +8,17 @@ from torch.nn import functional as F
 
 # --- 1. PROFESSIONAL CONFIGURATION SYSTEM ---
 DEFAULT_CONFIG = {
-    "n_embd": 256,
-    "n_head": 8,
-    "n_layer": 6,
-    "block_size": 384,
+    "n_embd": 128,
+    "n_head": 4,
+    "n_layer": 2,
+    "block_size": 128,
     "learning_rate": 8e-4,
     "min_lr": 8e-5,
-    "batch_size": 32,
-    "max_iters": 15000,
+    "batch_size": 8,
+    "max_iters": 500,
     "eval_interval": 250,
     "save_interval": 1000,
-    "num_threads": 4,
+    "num_threads": 6,
     "dropout": 0.1,
     "weight_decay": 0.1,
     "temperature": 0.75,
@@ -392,7 +392,7 @@ class Qwen3Model(nn.Module):
             
         return logits, loss, new_kv_caches
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, callback=None):
         self.eval()
         B, T = idx.shape
@@ -514,7 +514,7 @@ class TermuxSLM(nn.Module):
         loss = F.cross_entropy(logits.view(-1, self.vocab_size), targets.view(-1)) if targets is not None else None
         return logits, loss, new_kv_caches
 
-    @torch.no_grad()
+    @torch.inference_mode()
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, callback=None, eos_id=None):
         # Implementation similar to Qwen3Model.generate but using self.vocab_size
         self.eval()
@@ -630,6 +630,11 @@ if __name__ == "__main__":
     config = load_config(config_path if os.path.exists(config_path) else "model_config.json")
     torch.set_num_threads(config["num_threads"])
     torch.set_num_interop_threads(1)
+    
+    # Optimization for ARM CPUs
+    if hasattr(torch, 'set_flush_denormal'):
+        torch.set_flush_denormal(True)
+    
     device = get_device()
     
     print(f"Hardware Worker Threads Assigned: {config['num_threads']}")
@@ -639,19 +644,34 @@ if __name__ == "__main__":
     os.makedirs("models", exist_ok=True)
     os.makedirs("data_corpus", exist_ok=True)
     
-    try:
-        raw_text_stream = compile_training_corpus()
-    except Exception as e:
-        print(f"[-] Processing Interrupted: {e}")
-        exit(1)
-        
-    print(f"[Data Pipeline] Unified raw characters inside text stream: {len(raw_text_stream):,}")
+    data_bin_path = os.path.join("data_corpus", "data.bin")
     tokenizer = ByteTokenizer()
     
-    print("[Data Pipeline] Transforming symbols into byte-level tensors...")
-    encoded_stream = tokenizer.encode(raw_text_stream, bos=True, eos=True)
-    data_tensor = torch.tensor(encoded_stream, dtype=torch.long, device=device)
-    print(f"[Data Pipeline] Total token sequences built for memory assignment: {len(data_tensor):,}")
+    if os.path.exists(data_bin_path):
+        print(f"[Data Pipeline] Loading pre-tokenized data from {data_bin_path}...")
+        try:
+            data_tensor = torch.load(data_bin_path, map_location=device)
+            print(f"[Data Pipeline] Successfully loaded {len(data_tensor):,} tokens.")
+        except Exception as e:
+            print(f"[-] Failed to load {data_bin_path}: {e}. Re-tokenizing...")
+            data_tensor = None
+    else:
+        data_tensor = None
+
+    if data_tensor is None:
+        try:
+            raw_text_stream = compile_training_corpus()
+        except Exception as e:
+            print(f"[-] Processing Interrupted: {e}")
+            exit(1)
+            
+        print(f"[Data Pipeline] Unified raw characters inside text stream: {len(raw_text_stream):,}")
+        print("[Data Pipeline] Transforming symbols into byte-level tensors...")
+        encoded_stream = tokenizer.encode(raw_text_stream, bos=True, eos=True)
+        data_tensor = torch.tensor(encoded_stream, dtype=torch.long, device=device)
+        print(f"[Data Pipeline] Saving tokenized binary to {data_bin_path}...")
+        torch.save(data_tensor, data_bin_path)
+        print(f"[Data Pipeline] Total token sequences built: {len(data_tensor):,}")
     
     # 90/10 Train and Evaluation data splitting
     split_idx = int(0.9 * len(data_tensor))
