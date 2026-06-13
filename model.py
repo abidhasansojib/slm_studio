@@ -8,19 +8,23 @@ from torch.nn import functional as F
 
 # --- 1. PROFESSIONAL CONFIGURATION SYSTEM ---
 DEFAULT_CONFIG = {
-    "n_embd": 128,
-    "n_head": 4,
-    "n_layer": 4,
-    "block_size": 128,
-    "learning_rate": 6e-4,    # Balanced to prevent aggressive early token-memorization
-    "min_lr": 6e-5,
-    "batch_size": 16,         # Optimized to lock entirely into Mobile CPU L2/L3 caches
-    "max_iters": 1500,        # Extended target for deeper multi-source text processing
-    "eval_interval": 100,
-    "save_interval": 500,
-    "num_threads": 4,         # Allocates dedicated ARM performance cores exclusively
-    "dropout": 0.15,          # Drops 15% of internal neural activations to mitigate overfitting
-    "weight_decay": 0.1       # Punishes parameter over-clustering to prevent verbatim memorization
+    "n_embd": 256,            # Increased for better pattern representation
+    "n_head": 8,              # More heads for diverse attention patterns
+    "n_layer": 6,             # Deeper network for better logic
+    "block_size": 384,        # Significantly larger context window (approx 100 words)
+    "learning_rate": 8e-4,    
+    "min_lr": 8e-5,
+    "batch_size": 32,         
+    "max_iters": 15000,       # More steps needed for character-level learning
+    "eval_interval": 250,
+    "save_interval": 1000,
+    "num_threads": 4,         
+    "dropout": 0.1,           
+    "weight_decay": 0.1,      
+    "temperature": 0.75,
+    "top_k": 40,
+    "max_new_tokens": 200,
+    "stream": True
 }
 
 def load_config(path="model_config.json"):
@@ -71,8 +75,6 @@ def get_device():
         return 'cuda'
     elif hasattr(torch.backends, 'mps') and torch.backends.mps.is_available():
         return 'mps'
-    elif hasattr(torch, 'vulkan') and torch.vulkan.is_available():
-        return 'vulkan'
     return 'cpu'
 
 # --- 4. ADVANCED TRANSFORMER MODULES WITH REGULARIZATION ---
@@ -281,11 +283,14 @@ def compile_training_corpus(data_directory="data_corpus", fallback_file="trainin
     
     # 1. Self-Learning Loop Ingestion
     if os.path.exists("self_learning_buffer.txt"):
-        with open("self_learning_buffer.txt", "r", encoding="utf-8") as f:
-            buffer_data = f.read().strip()
-            if len(buffer_data) > 0:
-                compiled_text += buffer_data + "\n"
-                print("[Self-Learning Engine] Ingested user interface conversation histories.")
+        try:
+            with open("self_learning_buffer.txt", "r", encoding="utf-8") as f:
+                buffer_data = f.read().strip()
+                if len(buffer_data) > 0:
+                    compiled_text += buffer_data + "\n"
+                    print("[Self-Learning Engine] Ingested user interface conversation histories.")
+        except Exception as e:
+            print(f"[-] Warning: Failed to read self-learning buffer: {e}")
 
     # 2. Folder Corpora Aggregation (Wikipedia/Books/Scraped Text)
     if os.path.exists(data_directory) and os.path.isdir(data_directory):
@@ -293,18 +298,25 @@ def compile_training_corpus(data_directory="data_corpus", fallback_file="trainin
         if target_files:
             print(f"[Data Pipeline] Bundling {len(target_files)} external text sources from '{data_directory}'...")
             for path in target_files:
-                with open(path, 'r', encoding='utf-8') as f:
-                    compiled_text += f.read() + "\n"
-            return compiled_text
+                try:
+                    with open(path, 'r', encoding='utf-8') as f:
+                        compiled_text += f.read() + "\n"
+                except Exception as e:
+                    print(f"[-] Warning: Failed to read {path}: {e}")
 
     # 3. Native Fallback Script Verification
     if os.path.exists(fallback_file):
         print(f"[Data Pipeline] Processing native sequence script from '{fallback_file}'.")
-        with open(fallback_file, 'r', encoding='utf-8') as f:
-            compiled_text += f.read()
-        return compiled_text
+        try:
+            with open(fallback_file, 'r', encoding='utf-8') as f:
+                compiled_text += f.read()
+        except Exception as e:
+            print(f"[-] Warning: Failed to read fallback file: {e}")
+            
+    if not compiled_text.strip():
+        raise FileNotFoundError(f"Data stream targets missing. Populate '{data_directory}/' or '{fallback_file}' to proceed.")
         
-    raise FileNotFoundError("Data stream targets missing. Populate your 'data_corpus/' folder with text files to proceed.")
+    return compiled_text
 
 def get_batch(data, block_size, batch_size):
     ix = torch.randint(len(data) - block_size, (batch_size,))
@@ -338,6 +350,7 @@ if __name__ == "__main__":
     print(f"Target Compute Layer Engine: {device.upper()}")
     
     # Instantiate internal layout structure directories
+    os.makedirs("models", exist_ok=True)
     os.makedirs("data_corpus", exist_ok=True)
     
     try:

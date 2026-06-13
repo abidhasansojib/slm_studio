@@ -17,13 +17,6 @@ from model import (
     DEFAULT_CONFIG
 )
 
-# Graceful conditional import for GGUF handling
-try:
-    from llama_cpp import Llama
-    LLAMA_CPP_AVAILABLE = True
-except ImportError:
-    LLAMA_CPP_AVAILABLE = False
-
 # Initialize Flask
 app = Flask(__name__, template_folder='.')
 
@@ -46,10 +39,8 @@ class ExternalTrainingManager:
         self.tokenizer = ByteTokenizer()
         self.config = load_config()
         
-        # Dual-engine state parameters
+        # Model state parameters
         self.model = None          # PyTorch Model Instance
-        self.gguf_model = None     # Llama.cpp GGUF Model Instance
-        self.model_type = None     # 'gguf' or 'pytorch'
         
         # Automatically establish suggested model storage directory
         self.model_dir = "models"
@@ -58,35 +49,8 @@ class ExternalTrainingManager:
         self.init_model()
 
     def init_model(self):
-        """Scans for GGUF compiled models first, falling back to PyTorch .pt/.tar configurations if empty."""
+        """Initializes the PyTorch model and loads weights from .pt or .tar configurations."""
         self.config = load_config()
-        self.gguf_model = None
-        self.model = None
-        
-        # 1. SCAN FOR GGUF MODELS FIRST
-        gguf_files = [f for f in os.listdir(self.model_dir) if f.endswith('.gguf')]
-        
-        if gguf_files and LLAMA_CPP_AVAILABLE:
-            selected_gguf = os.path.join(self.model_dir, gguf_files[0])
-            self.log(f"Found GGUF model candidate inside '{self.model_dir}/': {gguf_files[0]}")
-            try:
-                self.gguf_model = Llama(
-                    model_path=selected_gguf,
-                    n_ctx=self.config.get("block_size", 128),
-                    n_threads=self.config.get("num_threads", 2),
-                    verbose=False
-                )
-                self.model_type = "gguf"
-                self.log(f"[ENGINE SWITCH] Running active sessions via Llama.cpp GGUF Core Engine Engine.")
-                return
-            except Exception as e:
-                self.log(f"Warning: Failed to load GGUF compilation layer ({e}). Attempting PyTorch paths...")
-
-        elif gguf_files and not LLAMA_CPP_AVAILABLE:
-            self.log("Warning: GGUF models detected, but 'llama-cpp-python' is not installed. Run 'pip install llama-cpp-python'.")
-
-        # 2. PYTORCH FALLBACK ENGINE (.pt or .tar)
-        self.model_type = "pytorch"
         self.model = TermuxSLM(
             vocab_size=self.tokenizer.vocab_size,
             n_embd=self.config["n_embd"],
@@ -96,27 +60,31 @@ class ExternalTrainingManager:
         ).to(self.device)
         
         # Check standard deployment weights file
-        if os.path.exists('native_slm.pt'):
+        pt_path = os.path.join(self.model_dir, 'native_slm.pt')
+        tar_path = os.path.join(self.model_dir, 'native_slm_checkpoint.tar')
+        
+        if os.path.exists(pt_path):
             try:
-                self.model.load_state_dict(torch.load('native_slm.pt', map_location=self.device))
-                self.log("Loaded PyTorch model weights from 'native_slm.pt'")
+                self.model.load_state_dict(torch.load(pt_path, map_location=self.device))
+                self.log(f"Loaded PyTorch model weights from '{pt_path}'")
                 self.model.eval()
             except Exception as e:
                 self.log(f"Warning: Could not load raw weights file: {e}. Checking backup structures...")
                 self._load_tar_fallback()
         # Check training snapshot archive file
-        elif os.path.exists('native_slm_checkpoint.tar'):
+        elif os.path.exists(tar_path):
             self._load_tar_fallback()
         else:
-            self.log("No compiled GGUF, 'native_slm.pt', or 'native_slm_checkpoint.tar' found. Ready for fresh training initialization.")
+            self.log(f"No PyTorch '.pt' or '.tar' found. Ready for fresh training initialization.")
 
     def _load_tar_fallback(self):
         """Helper to parse state parameters straight out of continuous training snapshot objects."""
-        if os.path.exists('native_slm_checkpoint.tar'):
+        tar_path = os.path.join(self.model_dir, 'native_slm_checkpoint.tar')
+        if os.path.exists(tar_path):
             try:
-                checkpoint = torch.load('native_slm_checkpoint.tar', map_location=self.device)
+                checkpoint = torch.load(tar_path, map_location=self.device)
                 self.model.load_state_dict(checkpoint['model_state_dict'])
-                self.log("Loaded PyTorch backup parameters successfully out of 'native_slm_checkpoint.tar'.")
+                self.log(f"Loaded PyTorch backup parameters successfully out of '{tar_path}'.")
                 self.model.eval()
             except Exception as tar_err:
                 self.log(f"Warning: Initialization error loading snapshot object: {tar_err}. Running random state weights.")
@@ -132,6 +100,20 @@ class ExternalTrainingManager:
         if len(self.logs) > 300:
             self.logs.pop(0)
 
+    def update_config(self, new_config):
+        """Helper to update internal config and save to disk."""
+        for k, v in new_config.items():
+            if k in DEFAULT_CONFIG:
+                if isinstance(DEFAULT_CONFIG[k], bool):
+                    self.config[k] = bool(v)
+                elif isinstance(DEFAULT_CONFIG[k], int):
+                    self.config[k] = int(v)
+                elif isinstance(DEFAULT_CONFIG[k], float):
+                    self.config[k] = float(v)
+                else:
+                    self.config[k] = v
+        save_config(self.config)
+
     def start_training(self, new_config=None):
         """Updates configurations and executes model.py as an isolated pipeline."""
         if self.is_training:
@@ -142,25 +124,20 @@ class ExternalTrainingManager:
             arch_keys = ["n_embd", "n_head", "n_layer", "block_size"]
             arch_changed = False
             for k in arch_keys:
-                if k in new_config and int(new_config[k]) != self.config[k]:
+                if k in new_config and int(new_config[k]) != self.config.get(k):
                     arch_changed = True
             
-            # Write adjustments directly to model_config.json
-            for k, v in new_config.items():
-                if k in self.config:
-                    if isinstance(DEFAULT_CONFIG[k], int):
-                        self.config[k] = int(v)
-                    elif isinstance(DEFAULT_CONFIG[k], float):
-                        self.config[k] = float(v)
-            save_config(self.config)
+            self.update_config(new_config)
             
             if arch_changed:
                 self.log("Network dimensions modified. Resetting checkpoint layers to prevent mismatch...")
-                if os.path.exists('native_slm.pt'):
-                    try: os.remove('native_slm.pt')
+                pt_path = os.path.join(self.model_dir, 'native_slm.pt')
+                tar_path = os.path.join(self.model_dir, 'native_slm_checkpoint.tar')
+                if os.path.exists(pt_path):
+                    try: os.remove(pt_path)
                     except: pass
-                if os.path.exists('native_slm_checkpoint.tar'):
-                    try: os.remove('native_slm_checkpoint.tar')
+                if os.path.exists(tar_path):
+                    try: os.remove(tar_path)
                     except: pass
                 self.init_model()
         
@@ -245,15 +222,11 @@ training_manager = ExternalTrainingManager()
 
 @app.route('/api/status', methods=['GET'])
 def get_status():
-    if training_manager.model_type == "gguf":
-        param_count = "N/A (GGUF Binary Compiled)"
-        device_info = "Llama.cpp Engine (CPU/Hardware-Bound)"
-    else:
-        param_count = sum(p.numel() for p in training_manager.model.parameters() if p.requires_grad) if training_manager.model else 0
-        device_info = training_manager.device.upper()
+    param_count = sum(p.numel() for p in training_manager.model.parameters() if p.requires_grad) if training_manager.model else 0
+    device_info = training_manager.device.upper()
     
     try:
-        threads = torch.get_num_threads() if training_manager.model_type == "pytorch" else training_manager.config.get("num_threads", 4)
+        threads = torch.get_num_threads()
     except:
         threads = training_manager.config.get("num_threads", 2)
         
@@ -270,7 +243,7 @@ def get_status():
         "param_count": param_count,
         "threads": threads,
         "config": training_manager.config,
-        "active_engine": training_manager.model_type
+        "active_engine": "pytorch"
     })
 
 @app.route('/api/train/start', methods=['POST'])
@@ -292,15 +265,15 @@ def stop_train():
 def reset_model_route():
     if training_manager.is_training:
         return jsonify({"error": "Cannot wipe weights while training loop is active.", "status": "error"}), 400
-    if training_manager.model_type == "gguf":
-        return jsonify({"error": "Cannot wipe weights while running an immutable GGUF binary model. Remove the file from the models directory instead.", "status": "error"}), 400
         
     training_manager.log("Resetting all parameters to random initial distribution values...")
-    if os.path.exists('native_slm.pt'):
-        try: os.remove('native_slm.pt')
+    pt_path = os.path.join(training_manager.model_dir, 'native_slm.pt')
+    tar_path = os.path.join(training_manager.model_dir, 'native_slm_checkpoint.tar')
+    if os.path.exists(pt_path):
+        try: os.remove(pt_path)
         except: pass
-    if os.path.exists('native_slm_checkpoint.tar'):
-        try: os.remove('native_slm_checkpoint.tar')
+    if os.path.exists(tar_path):
+        try: os.remove(tar_path)
         except: pass
     training_manager.init_model()
     return jsonify({"message": "Model reset completed. Weights cleared.", "status": "success"})
@@ -327,125 +300,107 @@ def handle_dataset():
         except Exception as e:
             return jsonify({"error": str(e), "status": "error"}), 500
 
+@app.route('/api/config/save', methods=['POST'])
+def save_config_route():
+    data = request.json or {}
+    training_manager.update_config(data)
+    return jsonify({"message": "Configuration saved successfully.", "status": "success"})
+
 @app.route('/api/chat', methods=['POST'])
 def chat_endpoint():
     if training_manager.is_training:
         return jsonify({"error": "Model training process is running. Please pause training to activate chat interactions."}), 400
 
     data = request.json or {}
+    messages = data.get('messages', [])
     prompt = data.get('prompt', '')
-    temperature = float(data.get('temperature', 0.8))
-    top_k = data.get('top_k')
+    
+    # Construct full context from history if messages are provided
+    if messages:
+        context = ""
+        for msg in messages:
+            role = "User" if msg['role'] == 'user' else "Assistant"
+            context += f"{role}: {msg['content']}\n"
+        context += "Assistant: "
+    else:
+        # Fallback to single prompt if no history (or if prompt is explicitly provided)
+        context = f"User: {prompt}\nAssistant: "
+
+    # Use defaults from config if not provided
+    temperature = float(data.get('temperature', training_manager.config.get('temperature', 0.7)))
+    top_k = data.get('top_k', training_manager.config.get('top_k', 40))
     if top_k is not None:
         top_k = int(top_k)
-    max_tokens = int(data.get('max_tokens', 150))
-    stream = data.get('stream', False)
+    max_tokens = int(data.get('max_tokens', training_manager.config.get('max_new_tokens', 150)))
+    stream = data.get('stream', training_manager.config.get('stream', True))
 
-    if not prompt:
+    if not context.strip():
         return jsonify({"error": "Empty prompt provided."}), 400
 
-    # --- ROUTE A: INTERACTIVE SELECTION VIA GGUF CORE ENGINE ---
-    if training_manager.model_type == "gguf":
-        if not stream:
-            start_time = time.time()
-            output = training_manager.gguf_model(
-                prompt,
-                max_tokens=max_tokens,
+    # --- NATIVE PYTORCH INFERENCE PATHWAY ---
+    prompt_tokens = training_manager.tokenizer.encode(context, bos=True, eos=False)
+    
+    # Truncate if context is longer than block_size - max_tokens
+    max_context = training_manager.config.get('block_size', 128) - max_tokens - 10
+    if len(prompt_tokens) > max_context:
+        prompt_tokens = prompt_tokens[-max_context:]
+        
+    input_tensor = torch.tensor([prompt_tokens], dtype=torch.long, device=training_manager.device)
+
+    if not stream:
+        start_time = time.time()
+        with torch.no_grad():
+            generated_ids = training_manager.model.generate(
+                input_tensor,
+                max_new_tokens=max_tokens,
                 temperature=temperature,
-                top_k=top_k if top_k is not None else 40
+                top_k=top_k
             )
-            elapsed = time.time() - start_time
-            response_text = output['choices'][0]['text']
-            tokens_gen = output['usage']['completion_tokens']
-            speed = tokens_gen / (elapsed + 1e-5)
-            
-            return jsonify({
-                "response": response_text,
-                "tokens_generated": tokens_gen,
-                "elapsed_seconds": elapsed,
-                "speed_tokens_sec": speed
-            })
-        else:
-            def generate_gguf_sse():
-                start_time = time.time()
-                response_stream = training_manager.gguf_model(
-                    prompt,
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    top_k=top_k if top_k is not None else 40,
-                    stream=True
-                )
-                tokens_streamed = 0
-                for chunk in response_stream:
-                    token_text = chunk['choices'][0]['text']
-                    tokens_streamed += 1
-                    yield f"data: {json.dumps({'token': token_text})}\n\n"
-                    
-                elapsed = time.time() - start_time
-                yield f"data: {json.dumps({'done': True, 'tokens_generated': tokens_streamed, 'elapsed_seconds': elapsed, 'speed_tokens_sec': tokens_streamed / (elapsed + 1e-5)})}\n\n"
-            
-            return Response(generate_gguf_sse(), mimetype='text/event-stream')
-
-    # --- ROUTE B: PYTORCH PARSING PATHWAY FALLBACK ---
+        elapsed = time.time() - start_time
+        response_text = training_manager.tokenizer.decode(generated_ids)
+        tokens_gen = len(generated_ids)
+        speed = tokens_gen / (elapsed + 1e-5)
+        
+        return jsonify({
+            "response": response_text,
+            "tokens_generated": tokens_gen,
+            "elapsed_seconds": elapsed,
+            "speed_tokens_sec": speed
+        })
     else:
-        prompt_tokens = training_manager.tokenizer.encode(prompt, bos=True, eos=False)
-        input_tensor = torch.tensor([prompt_tokens], dtype=torch.long, device=training_manager.device)
-
-        if not stream:
-            start_time = time.time()
-            with torch.no_grad():
-                generated_ids = training_manager.model.generate(
-                    input_tensor,
-                    max_new_tokens=max_tokens,
-                    temperature=temperature,
-                    top_k=top_k
-                )
-            elapsed = time.time() - start_time
-            full_text = training_manager.tokenizer.decode(generated_ids)
-            response_text = full_text[len(prompt):]
-            tokens_gen = len(generated_ids) - len(prompt_tokens)
-            speed = tokens_gen / (elapsed + 1e-5)
+        def generate_sse():
+            q = Queue()
+            def token_callback(token_id): q.put(token_id)
+                
+            def worker():
+                try:
+                    training_manager.model.generate(
+                        input_tensor,
+                        max_new_tokens=max_tokens,
+                        temperature=temperature,
+                        top_k=top_k,
+                        callback=token_callback
+                    )
+                except Exception as e:
+                    print(f"Streaming error: {e}")
+                finally:
+                    q.put(None)
             
-            return jsonify({
-                "response": response_text,
-                "tokens_generated": tokens_gen,
-                "elapsed_seconds": elapsed,
-                "speed_tokens_sec": speed
-            })
-        else:
-            def generate_sse():
-                q = Queue()
-                def token_callback(token_id): q.put(token_id)
-                    
-                def worker():
-                    try:
-                        training_manager.model.generate(
-                            input_tensor,
-                            max_new_tokens=max_tokens,
-                            temperature=temperature,
-                            top_k=top_k,
-                            callback=token_callback
-                        )
-                    except Exception as e:
-                        print(f"Streaming error: {e}")
-                    finally:
-                        q.put(None)
+            threading.Thread(target=worker, daemon=True).start()
+            start_time = time.time()
+            tokens_streamed = 0
+            
+            while True:
+                token_id = q.get()
+                if token_id is None:
+                    break
+                tokens_streamed += 1
+                yield f"data: {json.dumps({'token': training_manager.tokenizer.decode([token_id])})}\n\n"
                 
-                threading.Thread(target=worker, daemon=True).start()
-                start_time = time.time()
-                tokens_streamed = 0
-                
-                while True:
-                    token_id = q.get()
-                    if token_id is None:
-                        break
-                    tokens_streamed += 1
-                    yield f"data: {json.dumps({'token': training_manager.tokenizer.decode([token_id])})}\n\n"
-                    
-                elapsed = time.time() - start_time
-                yield f"data: {json.dumps({'done': True, 'tokens_generated': tokens_streamed, 'elapsed_seconds': elapsed, 'speed_tokens_sec': tokens_streamed / (elapsed + 1e-5)})}\n\n"
+            elapsed = time.time() - start_time
+            yield f"data: {json.dumps({'done': True, 'tokens_generated': tokens_streamed, 'elapsed_seconds': elapsed, 'speed_tokens_sec': tokens_streamed / (elapsed + 1e-5)})}\n\n"
 
-            return Response(generate_sse(), mimetype='text/event-stream')
+        return Response(generate_sse(), mimetype='text/event-stream')
 
 @app.route('/')
 def index_route():

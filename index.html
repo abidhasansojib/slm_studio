@@ -1048,8 +1048,8 @@
                         <div class="chat-messages" id="chatMessages">
                             <div class="chat-empty" id="chatEmpty">
                                 <i class="fa-solid fa-wand-magic-sparkles"></i>
-                                <h2>Local Language Model Playground</h2>
-                                <p style="font-size: 13px; max-width: 440px;">Custom local model using custom Llama framework parameters optimized natively with SwiGLU operations inside your execution shell layout.</p>
+                                <h2>Personal SLM Assistant</h2>
+                                <p style="font-size: 13px; max-width: 440px;">A native PyTorch Small Language Model optimized for mobile performance, trained on-device to provide intelligent and responsive English conversations.</p>
                             </div>
                         </div>
                         
@@ -1061,10 +1061,10 @@
 
                         <div class="chat-input-area">
                             <div class="prompt-suggestions" id="suggestions">
-                                <div class="suggestion-chip" onclick="applySuggestion('ROMEO:\nO, speak again, ')">Romeo monologue</div>
-                                <div class="suggestion-chip" onclick="applySuggestion('HAMLET:\nTo be, or not to ')">Hamlet quote</div>
-                                <div class="suggestion-chip" onclick="applySuggestion('FIRST CITIZEN:\nBefore we proceed ')">Tiny Shakespeare</div>
-                                <div class="suggestion-chip" onclick="applySuggestion('def bubble_sort(arr):')">Sorting Algorithm</div>
+                                <div class="suggestion-chip" onclick="applySuggestion('Who are you?')">Who are you?</div>
+                                <div class="suggestion-chip" onclick="applySuggestion('Who made you?')">Who is your creator?</div>
+                                <div class="suggestion-chip" onclick="applySuggestion('Can you help me learn English?')">Learn English</div>
+                                <div class="suggestion-chip" onclick="applySuggestion('Tell me a short story.')">Short Story</div>
                             </div>
                             <div class="input-wrapper">
                                 <textarea class="chat-textarea" id="chatInput" placeholder="Enter context or prompt..." onkeydown="handleChatKey(event)"></textarea>
@@ -1263,7 +1263,32 @@
                 this.style.height = 'auto';
                 this.style.height = Math.min(this.scrollHeight, 140) + 'px';
             });
+
+            // Add auto-save listeners for inference settings
+            ['tempInput', 'topkInput', 'tokensInput', 'streamInput'].forEach(id => {
+                const elem = document.getElementById(id);
+                elem.addEventListener('change', saveInferenceConfig);
+            });
         });
+
+        async function saveInferenceConfig() {
+            const payload = {
+                temperature: document.getElementById('tempInput').value,
+                top_k: document.getElementById('topkInput').value,
+                max_new_tokens: document.getElementById('tokensInput').value,
+                stream: document.getElementById('streamInput').checked
+            };
+
+            try {
+                await fetch('/api/config/save', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload)
+                });
+            } catch (err) {
+                console.error("Failed to auto-save config:", err);
+            }
+        }
 
         function toggleMobileSettings() {
             const sidebar = document.getElementById('chatSidebar');
@@ -1399,6 +1424,27 @@
                 document.getElementById('trainLossText').innerText = data.current_loss.toFixed(4);
                 document.getElementById('trainValLossText').innerText = data.val_loss.toFixed(4);
 
+                // Load Inference Settings from Config if not already set by user interaction
+                if (!window.inferenceSettingsLoaded) {
+                    const tempInput = document.getElementById('tempInput');
+                    const topkInput = document.getElementById('topkInput');
+                    const tokensInput = document.getElementById('tokensInput');
+                    const streamInput = document.getElementById('streamInput');
+
+                    tempInput.value = data.config.temperature || 0.7;
+                    updateVal('tempVal', tempInput.value);
+                    
+                    topkInput.value = data.config.top_k || 40;
+                    updateVal('topkVal', topkInput.value == 0 ? 'Off' : topkInput.value);
+                    
+                    tokensInput.value = data.config.max_new_tokens || 150;
+                    updateVal('tokensVal', tokensInput.value);
+                    
+                    streamInput.checked = data.config.stream !== undefined ? data.config.stream : true;
+                    
+                    window.inferenceSettingsLoaded = true;
+                }
+
                 const consoleDiv = document.getElementById('consoleLogs');
 		const isScrolledToBottom = consoleDiv.clientHeight + consoleDiv.scrollTop >= consoleDiv.scrollHeight - 20;
 
@@ -1528,6 +1574,12 @@
 
             document.getElementById('chatEmpty').style.display = 'none';
             appendMessage('user', prompt);
+            
+            // Add to history
+            chatHistory.push({ role: 'user', content: prompt });
+            // Keep history manageable (last 10 messages)
+            if (chatHistory.length > 10) chatHistory.shift();
+
             textarea.value = '';
             textarea.style.height = '36px';
 
@@ -1547,7 +1599,13 @@
                     const response = await fetch('/api/chat', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ prompt, temperature, top_k, max_tokens, stream: true })
+                        body: JSON.stringify({ 
+                            messages: chatHistory, 
+                            temperature, 
+                            top_k, 
+                            max_tokens, 
+                            stream: true 
+                        })
                     });
 
                     if (!response.ok) {
@@ -1562,6 +1620,7 @@
                     const reader = response.body.getReader();
                     const decoder = new TextDecoder('utf-8');
                     let buffer = '';
+                    let fullResponse = '';
 
                     while (true) {
                         const { value, done } = await reader.read();
@@ -1579,11 +1638,11 @@
                                     const parsed = JSON.parse(rawJSON);
                                     if (parsed.done) {
                                         bubbleStats.innerText = `Tokens: ${parsed.tokens_generated} | Speed: ${parsed.speed_tokens_sec.toFixed(1)} tok/s`;
+                                        chatHistory.push({ role: 'assistant', content: fullResponse });
                                     } else if (parsed.token) {
-                                        // Update streaming text content through format conversions securely
-                                        let updatedRaw = botMsgDiv.dataset.rawText + parsed.token;
-                                        botMsgDiv.dataset.rawText = updatedRaw;
-                                        bubbleText.innerHTML = formatCodeBlocks(escapeHtml(updatedRaw));
+                                        fullResponse += parsed.token;
+                                        botMsgDiv.dataset.rawText = fullResponse;
+                                        bubbleText.innerHTML = formatCodeBlocks(escapeHtml(fullResponse));
                                         scrollChat();
                                     }
                                 } catch (e) { console.error(e); }
@@ -1594,14 +1653,23 @@
                     const response = await fetch('/api/chat', {
                         method: 'POST',
                         headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ prompt, temperature, top_k, max_tokens, stream: false })
+                        body: JSON.stringify({ 
+                            messages: chatHistory, 
+                            temperature, 
+                            top_k, 
+                            max_tokens, 
+                            stream: false 
+                        })
                     });
 
                     const data = await response.json();
                     if (data.error) throw new Error(data.error);
 
-                    const botMsgDiv = appendMessage('assistant', data.response);
-                    botMsgDiv.querySelector('.msg-stats').innerText = `Tokens: ${data.tokens_generated} | Speed: ${data.speed_tokens_sec.toFixed(1)} tok/s`;
+                    appendMessage('assistant', data.response);
+                    chatHistory.push({ role: 'assistant', content: data.response });
+                    
+                    const lastMsg = document.querySelector('.chat-message.assistant:last-child');
+                    lastMsg.querySelector('.msg-stats').innerText = `Tokens: ${data.tokens_generated} | Speed: ${data.speed_tokens_sec.toFixed(1)} tok/s`;
                 }
             } catch (err) {
                 appendMessage('assistant', `⚠️ Execution Error: ${err.message}`);
