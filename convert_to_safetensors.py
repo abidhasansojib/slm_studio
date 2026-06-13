@@ -62,6 +62,12 @@ def save_safetensors(state_dict, path):
         offset += length
         binary_data.append(t_bytes)
         
+        # Align next tensor to 8 bytes
+        padding = (8 - (offset % 8)) % 8
+        if padding > 0:
+            binary_data.append(b"\0" * padding)
+            offset += padding
+        
     header["__metadata__"] = {"format": "pt"}
     header_json = json.dumps(header).encode("utf-8")
     

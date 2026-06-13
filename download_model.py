@@ -136,12 +136,14 @@ def download_model(url_or_repo, models_base_dir="models", log_callback=None):
         if primary_file.endswith(".gguf"):
             files_to_download = [primary_file]
         else:
-            # Likely a safetensors file, download config too
+            # Likely a safetensors file, download config and tokenizer files too
             files_to_download = [
                 "config.json",
                 "generation_config.json",
                 "tokenizer.json",
                 "tokenizer_config.json",
+                "vocab.json",
+                "merges.txt",
                 primary_file
             ]
     else:

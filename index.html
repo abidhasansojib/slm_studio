@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Mobile SLM Studio</title>
+    <title>SLM Studio</title>
     
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -766,7 +766,7 @@
             outline: none;
         }
 
-        /* --- TOGGLE CONTROLS FOR OVERLAY MOBILE --- */
+        /* --- TOGGLE CONTROLS FOR OVERLAY SETTINGS --- */
         .settings-toggle-btn {
             display: none;
             background: rgba(255,255,255,0.05);
@@ -947,7 +947,7 @@
                 font-size: 15px;
             }
 
-            .mobile-hide {
+            .sm-hide {
                 display: none;
             }
 
@@ -961,50 +961,52 @@
             }
 
             .chat-message {
-                max-width: 90%;
+                max-width: 92%;
             }
 
             .msg-bubble {
-                font-size: 13.5px;
-                padding: 10px 14px;
+                font-size: 14px;
+                padding: 12px 16px;
+                box-shadow: 0 4px 15px rgba(0, 0, 0, 0.25);
             }
 
             .chat-input-area {
-                padding: 12px 14px;
+                padding: 14px 16px;
             }
 
             .stats-grid {
                 grid-template-columns: repeat(2, 1fr);
-                gap: 10px;
+                gap: 12px;
             }
 
             .stat-card {
-                padding: 12px;
+                padding: 14px;
+                box-shadow: 0 4px 12px rgba(0, 0, 0, 0.1);
             }
 
             .stat-card .value {
-                font-size: 16px;
+                font-size: 17px;
             }
 
             .train-main, .dataset-layout {
-                padding: 14px;
+                padding: 16px;
             }
             
             .chart-container {
-                min-height: 220px;
-                padding: 14px;
+                min-height: 240px;
+                padding: 16px;
             }
         }
     </style>
 </head>
 <body>
 
-    <div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleMobileSettings()"></div>
+    <div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleSettings()"></div>
 
     <header>
         <div class="header-logo">
             <i class="fa-solid fa-brain logo-icon"></i>
-            <h1><span class="mobile-hide">Mobile </span>SLM<span> Studio</span></h1>
+            <h1><span>SLM Studio</span></h1>
         </div>
         <div class="header-status">
             <div class="status-chip" id="deviceChip">
@@ -1040,23 +1042,22 @@
             <div class="tab-content active" id="tab-chat">
                 <div class="chat-layout">
                     <div class="chat-main">
-                        <div class="chat-header">
-                            <span style="font-family: 'Outfit'; font-weight: 600; display: flex; align-items: center; gap: 8px; font-size: 14px;">
-                                <i class="fa-solid fa-terminal" style="color: var(--secondary)"></i> Sandbox Playground (<span id="loadedModelLabel" style="color:var(--primary)">native_slm</span>)
-                            </span>
-                            <button class="settings-toggle-btn" onclick="toggleMobileSettings()">
-                                <i class="fa-solid fa-sliders"></i> Config
-                            </button>
+                    <div class="chat-header">
+                        <span style="font-family: 'Outfit'; font-weight: 600; display: flex; align-items: center; gap: 8px; font-size: 14px;">
+                            <i class="fa-solid fa-terminal" style="color: var(--secondary)"></i> Sandbox Playground (<span id="loadedModelLabel" style="color:var(--primary)">native_slm</span>)
+                        </span>
+                        <button class="settings-toggle-btn" onclick="toggleSettings()">
+                            <i class="fa-solid fa-sliders"></i> Config
+                        </button>
+                    </div>
+
+                    <div class="chat-messages" id="chatMessages">
+                        <div class="chat-empty" id="chatEmpty">
+                            <i class="fa-solid fa-wand-magic-sparkles"></i>
+                            <h2>Personal SLM Assistant</h2>
+                            <p style="font-size: 13px; max-width: 440px;">A native PyTorch Small Language Model optimized for on-device performance, providing intelligent and responsive conversations.</p>
                         </div>
-                        
-                        <div class="chat-messages" id="chatMessages">
-                            <div class="chat-empty" id="chatEmpty">
-                                <i class="fa-solid fa-wand-magic-sparkles"></i>
-                                <h2>Personal SLM Assistant</h2>
-                                <p style="font-size: 13px; max-width: 440px;">A native PyTorch Small Language Model optimized for mobile performance, trained on-device to provide intelligent and responsive conversations.</p>
-                            </div>
-                        </div>
-                        
+                    </div>                        
                         <div class="typing-bubble" id="typingIndicator" style="display: none;">
                             <div class="typing-dot"></div>
                             <div class="typing-dot"></div>
@@ -1080,7 +1081,7 @@
                     <div class="chat-sidebar" id="chatSidebar">
                         <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">
                             <h3 class="section-title"><i class="fa-solid fa-gear"></i> Inference Settings</h3>
-                            <button class="close-settings-btn" onclick="toggleMobileSettings()"><i class="fa-solid fa-xmark"></i></button>
+                            <button class="close-settings-btn" onclick="toggleSettings()"><i class="fa-solid fa-xmark"></i></button>
                         </div>
                         
                         <div class="control-group">
@@ -1262,7 +1263,7 @@
                         <!-- Left side: Download model -->
                         <div class="stat-card" style="gap: 12px; padding: 20px; background: rgba(255,255,255,0.01);">
                             <h3 class="section-title" style="font-size: 14px;"><i class="fa-solid fa-cloud-arrow-down"></i> Download New Model</h3>
-                            <p style="font-size: 12px; color: var(--text-muted);">Download a model directly from Hugging Face. For mobile devices, <b>GGUF Mode</b> is highly recommended to run quantized models efficiently and prevent system UI crashes.</p>
+                            <p style="font-size: 12px; color: var(--text-muted);">Download a model directly from Hugging Face. For stable operation, <b>GGUF Mode</b> is highly recommended to run quantized models efficiently and prevent system crashes.</p>
                             
                             <!-- Mode selection -->
                             <div class="control-group" style="margin-top: 4px;">
@@ -1279,7 +1280,7 @@
                             
                             <!-- Recommended GGUF Models -->
                             <div class="control-group" id="recommendedModelsGroup" style="margin-top: 4px;">
-                                <label class="control-label">Recommended Mobile GGUF Models</label>
+                                <label class="control-label">Recommended GGUF Models</label>
                                 <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px;" id="recommendedShortcuts">
                                     <span class="suggestion-chip" onclick="applyModelPreset('Qwen/Qwen2.5-0.5B-Instruct-GGUF', 'qwen2.5-0.5b-instruct-q4_k_m.gguf')">Qwen2.5 0.5B Q4 (~398MB)</span>
                                     <span class="suggestion-chip" onclick="applyModelPreset('unsloth/Llama-3.2-1B-Instruct-GGUF', 'Llama-3.2-1B-Instruct-Q4_K_M.gguf')">Llama3.2 1B Q4 (~740MB)</span>
@@ -1386,7 +1387,7 @@
             }
         }
 
-        function toggleMobileSettings() {
+        function toggleSettings() {
             const sidebar = document.getElementById('chatSidebar');
             const overlay = document.getElementById('sidebarOverlay');
             if (sidebar.classList.contains('open')) {
@@ -1421,19 +1422,24 @@
         }
 
         function updateVal(elementId, value) {
-            document.getElementById(elementId).innerText = value;
+            const el = document.getElementById(elementId);
+            if (el) el.innerText = value;
         }
 
         function applySuggestion(text) {
             const textarea = document.getElementById('chatInput');
-            textarea.value = text;
-            textarea.style.height = 'auto';
-            textarea.style.height = Math.min(textarea.scrollHeight, 140) + 'px';
-            textarea.focus();
+            if (textarea) {
+                textarea.value = text;
+                textarea.style.height = 'auto';
+                textarea.style.height = Math.min(textarea.scrollHeight, 140) + 'px';
+                textarea.focus();
+            }
         }
 
         function initChart() {
-            const ctx = document.getElementById('lossChart').getContext('2d');
+            const canvas = document.getElementById('lossChart');
+            if (!canvas) return;
+            const ctx = canvas.getContext('2d');
             const trainGradient = ctx.createLinearGradient(0, 0, 0, 300);
             trainGradient.addColorStop(0, 'rgba(99, 102, 241, 0.2)');
             trainGradient.addColorStop(1, 'rgba(99, 102, 241, 0.0)');
@@ -1489,15 +1495,26 @@
                 const response = await fetch('/api/status');
                 const data = await response.json();
                 
-                document.getElementById('deviceText').innerText = data.device;
-                document.getElementById('deviceTextDetail').innerText = data.device;
-                document.getElementById('blockSizeText').innerText = data.config.block_size || 'N/A';
-                document.getElementById('nEmbdText').innerText = data.config.n_embd || data.config.hidden_size || 'N/A';
-                document.getElementById('nLayerText').innerText = data.config.n_layer || data.config.num_hidden_layers || 'N/A';
-                document.getElementById('loadedModelLabel').innerText = data.active_model;
+                const safeSetText = (id, text) => {
+                    const el = document.getElementById(id);
+                    if (el) el.innerText = text;
+                };
+
+                safeSetText('deviceText', data.device);
+                safeSetText('deviceTextDetail', data.device);
+                safeSetText('blockSizeText', data.config.block_size || 'N/A');
+                safeSetText('nEmbdText', data.config.n_embd || data.config.hidden_size || 'N/A');
+                safeSetText('nLayerText', data.config.n_layer || data.config.num_hidden_layers || 'N/A');
+                safeSetText('loadedModelLabel', data.active_model);
                 
-                const formattedParams = (data.param_count / 1000000).toFixed(2) + 'M';
-                document.getElementById('paramCountText').innerText = `${data.param_count.toLocaleString()} (${formattedParams})`;
+                const paramCount = data.param_count || 0;
+                const formattedParams = (paramCount / 1000000).toFixed(2) + 'M';
+                safeSetText('paramCountText', `${paramCount.toLocaleString()} (${formattedParams})`);
+
+                const startTrainBtn = document.getElementById('startTrainBtn');
+                const statusText = document.getElementById('statusText');
+                const statusChip = document.getElementById('statusChip');
+                const trainStatusText = document.getElementById('trainStatusText');
 
                 if (!data.is_training) {
                     const inputs = ['n_embd', 'n_head', 'n_layer', 'block_size', 'max_iters', 'batch_size', 'learning_rate', 'num_threads'];
@@ -1508,24 +1525,32 @@
                         }
                     });
                     
-                    document.getElementById('statusText').innerText = 'Idle';
-                    document.getElementById('statusChip').className = 'status-chip active';
-                    document.getElementById('trainStatusText').innerText = 'Idle';
-                    document.getElementById('trainStatusText').style.color = 'var(--text-muted)';
-                    document.getElementById('startTrainBtn').innerHTML = '<i class="fa-solid fa-play"></i> Start Engine Training';
-                    document.getElementById('startTrainBtn').className = 'action-btn btn-primary';
+                    if (statusText) statusText.innerText = 'Idle';
+                    if (statusChip) statusChip.className = 'status-chip active';
+                    if (trainStatusText) {
+                        trainStatusText.innerText = 'Idle';
+                        trainStatusText.style.color = 'var(--text-muted)';
+                    }
+                    if (startTrainBtn) {
+                        startTrainBtn.innerHTML = '<i class="fa-solid fa-play"></i> Start Engine Training';
+                        startTrainBtn.className = 'action-btn btn-primary';
+                    }
                 } else {
-                    document.getElementById('statusText').innerText = 'Training...';
-                    document.getElementById('statusChip').className = 'status-chip training';
-                    document.getElementById('trainStatusText').innerText = 'Training';
-                    document.getElementById('trainStatusText').style.color = 'var(--primary)';
-                    document.getElementById('startTrainBtn').innerHTML = '<i class="fa-solid fa-stop"></i> Terminate Training';
-                    document.getElementById('startTrainBtn').className = 'action-btn btn-danger';
+                    if (statusText) statusText.innerText = 'Training...';
+                    if (statusChip) statusChip.className = 'status-chip training';
+                    if (trainStatusText) {
+                        trainStatusText.innerText = 'Training';
+                        trainStatusText.style.color = 'var(--primary)';
+                    }
+                    if (startTrainBtn) {
+                        startTrainBtn.innerHTML = '<i class="fa-solid fa-stop"></i> Terminate Training';
+                        startTrainBtn.className = 'action-btn btn-danger';
+                    }
                 }
 
-                document.getElementById('trainStepText').innerText = `${data.current_step} / ${data.total_steps}`;
-                document.getElementById('trainLossText').innerText = data.current_loss.toFixed(4);
-                document.getElementById('trainValLossText').innerText = data.val_loss.toFixed(4);
+                safeSetText('trainStepText', `${data.current_step} / ${data.total_steps}`);
+                safeSetText('trainLossText', (data.current_loss || 0).toFixed(4));
+                safeSetText('trainValLossText', (data.val_loss || 0).toFixed(4));
 
                 // Load Inference Settings from Config if not already set by user interaction
                 if (!window.inferenceSettingsLoaded) {
@@ -1534,16 +1559,21 @@
                     const tokensInput = document.getElementById('tokensInput');
                     const streamInput = document.getElementById('streamInput');
 
-                    tempInput.value = data.config.temperature || 0.7;
-                    updateVal('tempVal', tempInput.value);
-                    
-                    topkInput.value = data.config.top_k || 40;
-                    updateVal('topkVal', topkInput.value == 0 ? 'Off' : topkInput.value);
-                    
-                    tokensInput.value = data.config.max_new_tokens || 150;
-                    updateVal('tokensVal', tokensInput.value);
-                    
-                    streamInput.checked = data.config.stream !== undefined ? data.config.stream : true;
+                    if (tempInput) {
+                        tempInput.value = data.config.temperature || 0.7;
+                        updateVal('tempVal', tempInput.value);
+                    }
+                    if (topkInput) {
+                        topkInput.value = data.config.top_k || 40;
+                        updateVal('topkVal', topkInput.value == 0 ? 'Off' : topkInput.value);
+                    }
+                    if (tokensInput) {
+                        tokensInput.value = data.config.max_new_tokens || 150;
+                        updateVal('tokensVal', tokensInput.value);
+                    }
+                    if (streamInput) {
+                        streamInput.checked = data.config.stream !== undefined ? data.config.stream : true;
+                    }
                     
                     window.inferenceSettingsLoaded = true;
                 }
@@ -1562,7 +1592,7 @@
                     }
                 });
 
-                if (data.losses_history.length > 0) {
+                if (data.losses_history && data.losses_history.length > 0 && lossChartObj) {
                     let sampleInterval = Math.max(1, Math.floor(data.losses_history.length / 300));
                     let labels = [];
                     let trainLosses = [];
@@ -1576,17 +1606,21 @@
                     lossChartObj.data.datasets[0].data = trainLosses;
 
                     let valLossData = Array(labels.length).fill(null);
-                    data.val_losses_history.forEach(pt => {
-                        let idx = labels.indexOf(pt.step);
-                        if (idx !== -1) valLossData[idx] = pt.loss;
-                    });
+                    if (data.val_losses_history) {
+                        data.val_losses_history.forEach(pt => {
+                            let idx = labels.indexOf(pt.step);
+                            if (idx !== -1) valLossData[idx] = pt.loss;
+                        });
+                    }
                     
                     lossChartObj.data.datasets[1].data = valLossData;
                     lossChartObj.update('none');
                 }
             } catch (err) {
-                document.getElementById('statusText').innerText = 'Offline';
-                document.getElementById('statusChip').className = 'status-chip';
+                const statusText = document.getElementById('statusText');
+                const statusChip = document.getElementById('statusChip');
+                if (statusText) statusText.innerText = 'Offline';
+                if (statusChip) statusChip.className = 'status-chip';
             }
         }
 
@@ -2039,11 +2073,13 @@
             if (!session) return;
             
             currentSessionId = session.id;
-            chatHistory = [...session.messages];
+            chatHistory = [...(session.messages || [])];
             
             const chatMessages = document.getElementById('chatMessages');
-            chatMessages.innerHTML = '';
-            document.getElementById('chatEmpty').style.display = 'none';
+            if (chatMessages) chatMessages.innerHTML = '';
+            
+            const chatEmpty = document.getElementById('chatEmpty');
+            if (chatEmpty) chatEmpty.style.display = 'none';
             
             chatHistory.forEach(msg => {
                 appendMessage(msg.role, msg.content);
@@ -2073,8 +2109,12 @@
         }
 
         function clearChat() {
-            document.getElementById('chatMessages').innerHTML = '';
-            document.getElementById('chatEmpty').style.display = 'flex';
+            const chatMessages = document.getElementById('chatMessages');
+            if (chatMessages) chatMessages.innerHTML = '';
+            
+            const chatEmpty = document.getElementById('chatEmpty');
+            if (chatEmpty) chatEmpty.style.display = 'flex';
+            
             chatHistory = [];
             currentSessionId = null;
         }
@@ -2091,7 +2131,9 @@
             const prompt = textarea.value.trim();
             if (!prompt) return;
 
-            document.getElementById('chatEmpty').style.display = 'none';
+            const chatEmpty = document.getElementById('chatEmpty');
+            if (chatEmpty) chatEmpty.style.display = 'none';
+            
             appendMessage('user', prompt);
             
             // Add to history
@@ -2105,15 +2147,18 @@
             textarea.style.height = '36px';
 
             const sendBtn = document.getElementById('sendBtn');
-            sendBtn.disabled = true;
-            document.getElementById('typingIndicator').style.display = 'flex';
+            if (sendBtn) sendBtn.disabled = true;
+            
+            const typingIndicator = document.getElementById('typingIndicator');
+            if (typingIndicator) typingIndicator.style.display = 'flex';
+            
             scrollChat();
 
-            const temperature = parseFloat(document.getElementById('tempInput').value);
-            let top_k = parseInt(document.getElementById('topkInput').value);
+            const temperature = parseFloat(document.getElementById('tempInput')?.value || 0.7);
+            let top_k = parseInt(document.getElementById('topkInput')?.value || 40);
             if (top_k === 0) top_k = null;
-            const max_tokens = parseInt(document.getElementById('tokensInput').value);
-            const useStream = document.getElementById('streamInput').checked;
+            const max_tokens = parseInt(document.getElementById('tokensInput')?.value || 150);
+            const useStream = document.getElementById('streamInput')?.checked;
 
             try {
                 if (useStream) {
@@ -2135,8 +2180,8 @@
                     }
 
                     const botMsgDiv = appendMessage('assistant', '');
-                    const bubbleText = botMsgDiv.querySelector('.msg-bubble');
-                    const bubbleStats = botMsgDiv.querySelector('.msg-stats');
+                    const bubbleText = botMsgDiv ? botMsgDiv.querySelector('.msg-bubble') : null;
+                    const bubbleStats = botMsgDiv ? botMsgDiv.querySelector('.msg-stats') : null;
                     
                     const reader = response.body.getReader();
                     const decoder = new TextDecoder('utf-8');
@@ -2158,13 +2203,13 @@
                                 try {
                                     const parsed = JSON.parse(rawJSON);
                                     if (parsed.done) {
-                                        bubbleStats.innerText = `Tokens: ${parsed.tokens_generated} | Speed: ${parsed.speed_tokens_sec.toFixed(1)} tok/s`;
+                                        if (bubbleStats) bubbleStats.innerText = `Tokens: ${parsed.tokens_generated || 0} | Speed: ${(parsed.speed_tokens_sec || 0).toFixed(1)} tok/s`;
                                         chatHistory.push({ role: 'assistant', content: fullResponse });
                                         saveCurrentSession();
                                     } else if (parsed.token) {
                                         fullResponse += parsed.token;
-                                        botMsgDiv.dataset.rawText = fullResponse;
-                                        bubbleText.innerHTML = formatCodeBlocks(escapeHtml(fullResponse));
+                                        if (botMsgDiv) botMsgDiv.dataset.rawText = fullResponse;
+                                        if (bubbleText) bubbleText.innerHTML = formatCodeBlocks(escapeHtml(fullResponse));
                                         scrollChat();
                                     }
                                 } catch (e) { console.error(e); }
@@ -2192,28 +2237,34 @@
                     saveCurrentSession();
                     
                     const lastMsg = document.querySelector('.chat-message.assistant:last-child');
-                    lastMsg.querySelector('.msg-stats').innerText = `Tokens: ${data.tokens_generated} | Speed: ${data.speed_tokens_sec.toFixed(1)} tok/s`;
+                    if (lastMsg) {
+                        const stats = lastMsg.querySelector('.msg-stats');
+                        if (stats) stats.innerText = `Tokens: ${data.tokens_generated || 0} | Speed: ${(data.speed_tokens_sec || 0).toFixed(1)} tok/s`;
+                    }
                 }
             } catch (err) {
                 appendMessage('assistant', `⚠️ Execution Error: ${err.message}`);
             } finally {
-                sendBtn.disabled = false;
-                document.getElementById('typingIndicator').style.display = 'none';
+                if (sendBtn) sendBtn.disabled = false;
+                if (typingIndicator) typingIndicator.style.display = 'none';
                 scrollChat();
             }
         }
 
         function appendMessage(sender, text) {
             const chatMessages = document.getElementById('chatMessages');
+            if (!chatMessages) return null;
+            
             const messageDiv = document.createElement('div');
             messageDiv.className = `chat-message ${sender}`;
-            messageDiv.dataset.rawText = text;
+            const safeText = text || '';
+            messageDiv.dataset.rawText = safeText;
 
             const avatarHTML = sender === 'user' 
                 ? '<div class="msg-avatar"><i class="fa-solid fa-user"></i></div>' 
                 : '<div class="msg-avatar"><i class="fa-solid fa-robot"></i></div>';
 
-            const formatContent = sender === 'assistant' ? formatCodeBlocks(escapeHtml(text)) : escapeHtml(text);
+            const formatContent = sender === 'assistant' ? formatCodeBlocks(escapeHtml(safeText)) : escapeHtml(safeText);
 
             messageDiv.innerHTML = `
                 ${avatarHTML}

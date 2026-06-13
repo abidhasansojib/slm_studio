@@ -4,6 +4,7 @@ import json
 import threading
 import subprocess
 import shutil
+import codecs
 from queue import Queue
 import torch
 from flask import Flask, request, jsonify, Response, render_template
@@ -307,14 +308,23 @@ class ExternalTrainingManager:
                 ).to(model_dtype).to(self.device)
                 
             if state_dict:
-                if any(k.startswith("model.") for k in state_dict.keys()):
-                    self.log("Adjusting state_dict keys (stripping 'model.' prefix)...")
-                    state_dict = { (k[6:] if k.startswith("model.") else k): v for k, v in state_dict.items() }
+                # Identify common prefixes and strip them if they don't match our model's keys
+                model_keys = set(self.model.state_dict().keys())
+                state_keys = set(state_dict.keys())
+                
+                if not any(k in model_keys for k in state_keys):
+                    for prefix in ["model.", "transformer.", "base_model.model.", "llm.", "vision_tower.model."]:
+                        if any(k.startswith(prefix) for k in state_keys):
+                            self.log(f"Adjusting state_dict keys (stripping '{prefix}' prefix)...")
+                            state_dict = { (k[len(prefix):] if k.startswith(prefix) else k): v for k, v in state_dict.items() }
+                            state_keys = set(state_dict.keys())
+                            if any(k in model_keys for k in state_keys):
+                                break
                 
                 # Cast state_dict tensors to model_dtype to ensure clean loading
-                state_dict = {k: v.to(model_dtype) for k, v in state_dict.items()}
+                state_dict = {k: v.to(model_dtype) for k, v in state_dict.items() if k in model_keys}
                 
-                self.model.load_state_dict(state_dict)
+                self.model.load_state_dict(state_dict, strict=False)
                 self.model.eval()
                 self.log(f"Successfully loaded '{model_name}' weights!")
             else:
@@ -711,15 +721,16 @@ def chat_endpoint():
             "max_tokens": max_tokens,
             "stream": stream
         }
+
+        req = urllib.request.Request(
+            "http://127.0.0.1:5001/v1/chat/completions",
+            data=json.dumps(payload).encode('utf-8'),
+            headers={"Content-Type": "application/json"}
+        )
         
         if not stream:
             start_time = time.time()
             try:
-                req = urllib.request.Request(
-                    "http://127.0.0.1:5001/v1/chat/completions",
-                    data=json.dumps(payload).encode('utf-8'),
-                    headers={"Content-Type": "application/json"}
-                )
                 with urllib.request.urlopen(req) as response:
                     res_data = json.loads(response.read().decode('utf-8'))
                 
@@ -739,26 +750,18 @@ def chat_endpoint():
                 return jsonify({"error": f"Failed to communicate with llama-server: {e}"}), 500
         else:
             def generate_gguf_sse():
-                import urllib.request
-                import json
-                
-                req = urllib.request.Request(
-                    "http://127.0.0.1:5001/v1/chat/completions",
-                    data=json.dumps(payload).encode('utf-8'),
-                    headers={"Content-Type": "application/json"}
-                )
-                
                 start_time = time.time()
                 tokens_streamed = 0
                 
                 try:
+                    decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
                     with urllib.request.urlopen(req) as response:
                         buffer = ""
                         while True:
                             chunk = response.read(1024)
                             if not chunk:
                                 break
-                            buffer += chunk.decode('utf-8', errors='ignore')
+                            buffer += decoder.decode(chunk)
                             while "\n" in buffer:
                                 line, buffer = buffer.split("\n", 1)
                                 line = line.strip()
@@ -830,7 +833,8 @@ def chat_endpoint():
                         max_new_tokens=max_tokens,
                         temperature=temperature,
                         top_k=top_k,
-                        callback=token_callback
+                        callback=token_callback,
+                        eos_id=training_manager.tokenizer.eos_token
                     )
                 except Exception as e:
                     print(f"Streaming error: {e}")

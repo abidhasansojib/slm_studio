@@ -170,51 +170,68 @@ class QwenTokenizer:
         self.pad_token = self.vocab.get("<|endoftext|>", 151643)
 
     def encode(self, text: str, bos: bool = False, eos: bool = False) -> list[int]:
-        # Very simplified encoding: just try to match longest substrings from vocab
-        # In a real scenario, this should be BPE. For now, we'll do basic mapping.
-        # Since Qwen vocab is large, we'll just handle basic ASCII/UTF-8 bytes as fallbacks if possible
-        # or just use a placeholder if we don't want to implement full BPE here.
-        # Actually, for inference to work at all, we need proper BPE.
-        # Let's try to use a simple greedy approach for now, or just warn.
         tokens = []
         if bos: tokens.append(self.bos_token)
         
-        # Fallback to UTF-8 bytes mapped to vocab if BPE not implemented
-        # Qwen vocab contains byte-level entries like "<0x00>" etc.
+        # Greedy longest-match encoding
         i = 0
         while i < len(text):
             found = False
-            for length in range(min(20, len(text) - i), 0, -1):
+            # Try to match longest possible substring in vocab
+            for length in range(min(32, len(text) - i), 0, -1):
                 sub = text[i:i+length]
                 if sub in self.vocab:
                     tokens.append(self.vocab[sub])
                     i += length
                     found = True
                     break
+            
             if not found:
-                # Map to byte token if possible
+                # Fallback to byte-level tokens
                 byte_val = text[i].encode('utf-8')
                 for b in byte_val:
                     byte_repr = f"<0x{b:02X}>"
-                    tokens.append(self.vocab.get(byte_repr, self.vocab.get(chr(b), 0)))
+                    if byte_repr in self.vocab:
+                        tokens.append(self.vocab[byte_repr])
+                    else:
+                        # Extreme fallback
+                        tokens.append(0)
                 i += 1
         
         if eos: tokens.append(self.eos_token)
         return tokens
 
     def decode(self, tokens: list[int]) -> str:
-        res = ""
+        full_res = ""
+        byte_data = bytearray()
         for t in tokens:
             if t in self.inv_vocab:
                 s = self.inv_vocab[t]
-                if s.startswith("<0x") and s.endswith(">"):
+                if s.startswith("<0x") and len(s) == 6 and s.endswith(">"):
                     try:
-                        res += chr(int(s[3:5], 16))
+                        byte_data.append(int(s[3:5], 16))
                     except:
-                        res += s
-                elif s not in ["<|endoftext|>", "<|im_start|>", "<|im_end|>"]:
-                    res += s
-        return res
+                        if byte_data:
+                            full_res += byte_data.decode('utf-8', errors='replace')
+                            byte_data = bytearray()
+                        full_res += s
+                elif s in ["<|endoftext|>", "<|im_start|>", "<|im_end|>"]:
+                    continue
+                else:
+                    if byte_data:
+                        full_res += byte_data.decode('utf-8', errors='replace')
+                        byte_data = bytearray()
+                    full_res += s
+            else:
+                # Unknown token
+                if byte_data:
+                    full_res += byte_data.decode('utf-8', errors='replace')
+                    byte_data = bytearray()
+                
+        if byte_data:
+            full_res += byte_data.decode('utf-8', errors='replace')
+            
+        return full_res
 
 # --- 3. HARDWARE CAPABILITY MONITOR ---
 def get_device():
@@ -498,7 +515,7 @@ class TermuxSLM(nn.Module):
         return logits, loss, new_kv_caches
 
     @torch.no_grad()
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, callback=None):
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, callback=None, eos_id=None):
         # Implementation similar to Qwen3Model.generate but using self.vocab_size
         self.eval()
         kv_caches = [None] * len(self.layers)
@@ -510,7 +527,19 @@ class TermuxSLM(nn.Module):
         probs = F.softmax(next_token_logits, dim=-1); next_token = torch.multinomial(probs, num_samples=1)
         generated = [next_token.item()]
         if callback: callback(next_token.item())
+        
+        # Support multiple EOS tokens
+        if eos_id is None:
+            eos_ids = []
+        elif isinstance(eos_id, int):
+            eos_ids = [eos_id]
+        else:
+            eos_ids = eos_id
+            
         for _ in range(max_new_tokens - 1):
+            if next_token.item() in eos_ids:
+                break
+                
             logits, _, kv_caches = self(next_token, kv_caches=kv_caches)
             next_token_logits = logits[:, -1, :].to(torch.float32) / (temperature + 1e-5)
             if top_k is not None:
@@ -519,7 +548,7 @@ class TermuxSLM(nn.Module):
             probs = F.softmax(next_token_logits, dim=-1); next_token = torch.multinomial(probs, num_samples=1)
             generated.append(next_token.item())
             if callback: callback(next_token.item())
-            if next_token.item() == 258: break
+            
         return generated
 
 # --- 6. MULTI-SOURCE CORPUS COMPILATION PIPELINE ---
@@ -587,7 +616,7 @@ def estimate_loss(model, data, block_size, batch_size, eval_iters=5):
 # --- 7. PRODUCTION CONTINUAL LEARNING LOOP ---
 if __name__ == "__main__":
     print("================================================================")
-    print("  Professional Continual Learning Engine (ARM Mobile Architecture) ")
+    print("  Professional Continual Learning Engine (ARM Architecture) ")
     print("================================================================")
     
     model_dir = "models/native_slm"
