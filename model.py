@@ -170,17 +170,9 @@ class QwenTokenizer:
         self.pad_token = self.vocab.get("<|endoftext|>", 151643)
 
     def encode(self, text: str, bos: bool = False, eos: bool = False) -> list[int]:
-        # Very simplified encoding: just try to match longest substrings from vocab
-        # In a real scenario, this should be BPE. For now, we'll do basic mapping.
-        # Since Qwen vocab is large, we'll just handle basic ASCII/UTF-8 bytes as fallbacks if possible
-        # or just use a placeholder if we don't want to implement full BPE here.
-        # Actually, for inference to work at all, we need proper BPE.
-        # Let's try to use a simple greedy approach for now, or just warn.
         tokens = []
         if bos: tokens.append(self.bos_token)
         
-        # Fallback to UTF-8 bytes mapped to vocab if BPE not implemented
-        # Qwen vocab contains byte-level entries like "<0x00>" etc.
         i = 0
         while i < len(text):
             found = False
@@ -192,7 +184,6 @@ class QwenTokenizer:
                     found = True
                     break
             if not found:
-                # Map to byte token if possible
                 byte_val = text[i].encode('utf-8')
                 for b in byte_val:
                     byte_repr = f"<0x{b:02X}>"
@@ -261,15 +252,16 @@ class RoPE(nn.Module):
 class Qwen3Attention(nn.Module):
     def __init__(self, config, rope):
         super().__init__()
-        self.n_head = config["num_attention_heads"]
-        self.n_kv_head = config["num_key_value_heads"]
-        self.head_size = config.get("head_dim", config["hidden_size"] // self.n_head)
+        self.n_head = config.get("num_attention_heads", 12)
+        self.n_kv_head = config.get("num_key_value_heads", self.n_head)
+        hidden_size = config.get("hidden_size", config.get("n_embd", 768))
+        self.head_size = config.get("head_dim", hidden_size // self.n_head)
         self.rope = rope
         
-        self.q_proj = nn.Linear(config["hidden_size"], self.n_head * self.head_size, bias=False)
-        self.k_proj = nn.Linear(config["hidden_size"], self.n_kv_head * self.head_size, bias=False)
-        self.v_proj = nn.Linear(config["hidden_size"], self.n_kv_head * self.head_size, bias=False)
-        self.o_proj = nn.Linear(self.n_head * self.head_size, config["hidden_size"], bias=False)
+        self.q_proj = nn.Linear(hidden_size, self.n_head * self.head_size, bias=False)
+        self.k_proj = nn.Linear(hidden_size, self.n_kv_head * self.head_size, bias=False)
+        self.v_proj = nn.Linear(hidden_size, self.n_kv_head * self.head_size, bias=False)
+        self.o_proj = nn.Linear(self.n_head * self.head_size, hidden_size, bias=False)
         
         self.q_norm = RMSNorm(self.head_size, eps=config.get("rms_norm_eps", 1e-6))
         self.k_norm = RMSNorm(self.head_size, eps=config.get("rms_norm_eps", 1e-6))
@@ -315,9 +307,12 @@ class Qwen3Attention(nn.Module):
 class Qwen3MLP(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.gate_proj = nn.Linear(config["hidden_size"], config["intermediate_size"], bias=False)
-        self.up_proj = nn.Linear(config["hidden_size"], config["intermediate_size"], bias=False)
-        self.down_proj = nn.Linear(config["intermediate_size"], config["hidden_size"], bias=False)
+        hidden_size = config.get("hidden_size", config.get("n_embd", 768))
+        intermediate_size = config.get("intermediate_size", int(hidden_size * 2.7))
+        
+        self.gate_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+        self.up_proj = nn.Linear(hidden_size, intermediate_size, bias=False)
+        self.down_proj = nn.Linear(intermediate_size, hidden_size, bias=False)
 
     def forward(self, x):
         return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
@@ -325,10 +320,12 @@ class Qwen3MLP(nn.Module):
 class Qwen3Block(nn.Module):
     def __init__(self, config, rope):
         super().__init__()
+        hidden_size = config.get("hidden_size", config.get("n_embd", 768))
+        
         self.self_attn = Qwen3Attention(config, rope)
         self.mlp = Qwen3MLP(config)
-        self.input_layernorm = RMSNorm(config["hidden_size"], eps=config.get("rms_norm_eps", 1e-6))
-        self.post_attention_layernorm = RMSNorm(config["hidden_size"], eps=config.get("rms_norm_eps", 1e-6))
+        self.input_layernorm = RMSNorm(hidden_size, eps=config.get("rms_norm_eps", 1e-6))
+        self.post_attention_layernorm = RMSNorm(hidden_size, eps=config.get("rms_norm_eps", 1e-6))
 
     def forward(self, x, mask=None, kv_cache=None):
         attn_out, new_cache = self.self_attn(self.input_layernorm(x), mask=mask, kv_cache=kv_cache)
@@ -340,16 +337,24 @@ class Qwen3Model(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.embed_tokens = nn.Embedding(config["vocab_size"], config["hidden_size"])
-        self.rope = RoPE(dim=config.get("head_dim", config["hidden_size"] // config["num_attention_heads"]), 
+        
+        # SAFE DEFAULTS: Fallback gracefully if high-parameter config metadata keys are absent
+        self.vocab_size = config.get("vocab_size", config.get("padded_vocab_size", 151936))
+        hidden_size = config.get("hidden_size", config.get("n_embd", 768))
+        num_heads = config.get("num_attention_heads", 12)
+        num_layers = config.get("num_hidden_layers", 12)
+        
+        self.embed_tokens = nn.Embedding(self.vocab_size, hidden_size)
+        
+        self.rope = RoPE(dim=config.get("head_dim", hidden_size // num_heads), 
                          max_seq_len=config.get("max_position_embeddings", 4096),
                          theta=config.get("rope_theta", 1000000.0))
         
         self.layers = nn.ModuleList([
-            Qwen3Block(config, self.rope) for _ in range(config["num_hidden_layers"])
+            Qwen3Block(config, self.rope) for _ in range(num_layers)
         ])
-        self.norm = RMSNorm(config["hidden_size"], eps=config.get("rms_norm_eps", 1e-6))
-        self.lm_head = nn.Linear(config["hidden_size"], config["vocab_size"], bias=False)
+        self.norm = RMSNorm(hidden_size, eps=config.get("rms_norm_eps", 1e-6))
+        self.lm_head = nn.Linear(hidden_size, self.vocab_size, bias=False)
         
         if config.get("tie_word_embeddings", True):
             self.lm_head.weight = self.embed_tokens.weight
@@ -371,7 +376,7 @@ class Qwen3Model(nn.Module):
         
         loss = None
         if targets is not None:
-            loss = F.cross_entropy(logits.view(-1, self.config["vocab_size"]), targets.view(-1))
+            loss = F.cross_entropy(logits.view(-1, self.vocab_size), targets.view(-1))
             
         return logits, loss, new_kv_caches
 
@@ -386,7 +391,7 @@ class Qwen3Model(nn.Module):
         next_token_logits = logits[:, -1, :].to(torch.float32) / (temperature + 1e-5)
         
         if top_k is not None:
-            v, _ = torch.topk(next_token_logits, min(top_k, self.config["vocab_size"]))
+            v, _ = torch.topk(next_token_logits, min(top_k, self.vocab_size))
             next_token_logits[next_token_logits < v[:, [-1]]] = -float('Inf')
             
         probs = F.softmax(next_token_logits, dim=-1)
@@ -399,7 +404,7 @@ class Qwen3Model(nn.Module):
             logits, _, kv_caches = self(next_token, kv_caches=kv_caches)
             next_token_logits = logits[:, -1, :].to(torch.float32) / (temperature + 1e-5)
             if top_k is not None:
-                v, _ = torch.topk(next_token_logits, min(top_k, self.config["vocab_size"]))
+                v, _ = torch.topk(next_token_logits, min(top_k, self.vocab_size))
                 next_token_logits[next_token_logits < v[:, [-1]]] = -float('Inf')
                 
             probs = F.softmax(next_token_logits, dim=-1)
@@ -417,7 +422,6 @@ class Qwen3Model(nn.Module):
 class TransformerBlock(nn.Module):
     def __init__(self, n_embd, n_head, rope, dropout=0.15):
         super().__init__()
-        # Simplified Attention for training
         self.attention = Attention(n_embd, n_head, rope, dropout=dropout)
         self.ffwd = FeedForward(n_embd, dropout=dropout)
         self.norm1 = RMSNorm(n_embd)
@@ -499,7 +503,6 @@ class TermuxSLM(nn.Module):
 
     @torch.no_grad()
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, callback=None):
-        # Implementation similar to Qwen3Model.generate but using self.vocab_size
         self.eval()
         kv_caches = [None] * len(self.layers)
         logits, _, kv_caches = self(idx, kv_caches=kv_caches)
@@ -524,13 +527,8 @@ class TermuxSLM(nn.Module):
 
 # --- 6. MULTI-SOURCE CORPUS COMPILATION PIPELINE ---
 def compile_training_corpus(data_directory="data_corpus", fallback_file="training_data.txt"):
-    """
-    Scans for raw encyclopedic knowledge and live user interaction loops, 
-    compiling them dynamically into a unified training vector.
-    """
     compiled_text = ""
     
-    # 1. Self-Learning Loop Ingestion
     if os.path.exists("self_learning_buffer.txt"):
         try:
             with open("self_learning_buffer.txt", "r", encoding="utf-8") as f:
@@ -541,7 +539,6 @@ def compile_training_corpus(data_directory="data_corpus", fallback_file="trainin
         except Exception as e:
             print(f"[-] Warning: Failed to read self-learning buffer: {e}")
 
-    # 2. Folder Corpora Aggregation (Wikipedia/Books/Scraped Text)
     if os.path.exists(data_directory) and os.path.isdir(data_directory):
         target_files = [os.path.join(data_directory, f) for f in os.listdir(data_directory) if f.endswith('.txt')]
         if target_files:
@@ -553,7 +550,6 @@ def compile_training_corpus(data_directory="data_corpus", fallback_file="trainin
                 except Exception as e:
                     print(f"[-] Warning: Failed to read {path}: {e}")
 
-    # 3. Native Fallback Script Verification
     if os.path.exists(fallback_file):
         print(f"[Data Pipeline] Processing native sequence script from '{fallback_file}'.")
         try:
@@ -601,7 +597,6 @@ if __name__ == "__main__":
     print(f"Hardware Worker Threads Assigned: {config['num_threads']}")
     print(f"Target Compute Layer Engine: {device.upper()}")
     
-    # Instantiate internal layout structure directories
     os.makedirs("models", exist_ok=True)
     os.makedirs("data_corpus", exist_ok=True)
     
@@ -619,12 +614,10 @@ if __name__ == "__main__":
     data_tensor = torch.tensor(encoded_stream, dtype=torch.long, device=device)
     print(f"[Data Pipeline] Total token sequences built for memory assignment: {len(data_tensor):,}")
     
-    # 90/10 Train and Evaluation data splitting
     split_idx = int(0.9 * len(data_tensor))
     train_data = data_tensor[:split_idx]
     val_data = data_tensor[split_idx:]
     
-    # Build core network architecture
     model = TermuxSLM(
         vocab_size=tokenizer.vocab_size,
         n_embd=config["n_embd"],
@@ -634,24 +627,19 @@ if __name__ == "__main__":
         dropout=config.get("dropout", 0.15)
     ).to(device)
     
-    # Professional optimizer with weight decay scaling to prevent over-clustering
     optimizer = torch.optim.AdamW(model.parameters(), lr=config["learning_rate"], weight_decay=config.get("weight_decay", 0.1))
     
-    # --- NON-DESTRUCTIVE RUNTIME RESUMPTION GUARD ---
-    checkpoint_tar_path = os.path.join(model_dir, 'checkpoint.tar') # Main session snapshot container
-    active_runtime_weights = os.path.join(model_dir, 'model.pt')           # Target weight path consumed by Flask Server
+    checkpoint_tar_path = os.path.join(model_dir, 'checkpoint.tar')
+    active_runtime_weights = os.path.join(model_dir, 'model.pt')
     start_step = 0
     
     if os.path.exists(checkpoint_tar_path):
         try:
             print(f"[Checkpoint Manager] Located session cache layout file. Restoring context parameters...")
             checkpoint = torch.load(checkpoint_tar_path, map_location=device)
-            
-            # Safely recover weights, step matrices, and optimizer momentum
             model.load_state_dict(checkpoint['model_state_dict'])
             optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
             start_step = checkpoint['step'] + 1
-            
             print(f"--> Success! Session state restored. Progress resuming instantly at Step {start_step}.")
         except Exception as e:
             print(f"[-] Snapshot read warning ({e}). Regenerating a fresh session trace context.")
@@ -669,30 +657,25 @@ if __name__ == "__main__":
     start_time = time.time()
     
     for step in range(start_step, total_target_iters + 1):
-        # Continuous Cosine Learning Rate Decay Curve Calculation
         progress = step / total_target_iters
         lr = config["min_lr"] + 0.5 * (config["learning_rate"] - config["min_lr"]) * (1.0 + math.cos(math.pi * progress))
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
 
-        # Fetch vectorized training slices
         xb, yb = get_batch(train_data, config["block_size"], config["batch_size"])
         
         _, loss, _ = model(xb, yb)
         optimizer.zero_grad(set_to_none=True)
         loss.backward()
         
-        # Norm clipping prevents exploding gradients from corrupting weights
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
         
-        # Evaluation cycles
         if step % config["eval_interval"] == 0 or step == total_target_iters:
             val_loss = estimate_loss(model, val_data, config["block_size"], config["batch_size"], eval_iters=5)
             elapsed = time.time() - start_time
             print(f"Step {step:4d}/{total_target_iters} | Train Loss: {loss.item():.4f} | Val Loss: {val_loss:.4f} | LR: {lr:.6f} | Runtime: {elapsed:.1f}s")
             
-        # Snapshot auto-saves
         if step % config["save_interval"] == 0 and step > start_step:
             print(f"--> Exporting comprehensive training session checkpoint matrices...")
             torch.save({
@@ -702,12 +685,10 @@ if __name__ == "__main__":
                 'loss': loss.item(),
             }, checkpoint_tar_path)
             
-            # Save raw model weights file explicitly for the Flask runtime server
             torch.save(model.state_dict(), active_runtime_weights)
             save_config(config, config_path)
             print(f"--> Snapshot saved successfully to '{checkpoint_tar_path}' and '{active_runtime_weights}'.")
             
-    # Final iteration milestone save
     torch.save({
         'step': total_target_iters,
         'model_state_dict': model.state_dict(),
