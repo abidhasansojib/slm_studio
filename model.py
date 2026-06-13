@@ -8,19 +8,19 @@ from torch.nn import functional as F
 
 # --- 1. PROFESSIONAL CONFIGURATION SYSTEM ---
 DEFAULT_CONFIG = {
-    "n_embd": 256,            # Increased for better pattern representation
-    "n_head": 8,              # More heads for diverse attention patterns
-    "n_layer": 6,             # Deeper network for better logic
-    "block_size": 384,        # Significantly larger context window (approx 100 words)
-    "learning_rate": 8e-4,    
+    "n_embd": 256,
+    "n_head": 8,
+    "n_layer": 6,
+    "block_size": 384,
+    "learning_rate": 8e-4,
     "min_lr": 8e-5,
-    "batch_size": 32,         
-    "max_iters": 15000,       # More steps needed for character-level learning
+    "batch_size": 32,
+    "max_iters": 15000,
     "eval_interval": 250,
     "save_interval": 1000,
-    "num_threads": 4,         
-    "dropout": 0.1,           
-    "weight_decay": 0.1,      
+    "num_threads": 4,
+    "dropout": 0.1,
+    "weight_decay": 0.1,
     "temperature": 0.75,
     "top_k": 40,
     "max_new_tokens": 200,
@@ -47,6 +47,89 @@ def save_config(config, path="model_config.json"):
     except Exception as e:
         print(f"[-] Failed to update architecture configuration metadata: {e}")
 
+def load_safetensors(path, device="cpu"):
+    """
+    Manually loads .safetensors files without requiring the 'safetensors' pip module.
+    """
+    with open(path, "rb") as f:
+        # 1. Read header length (8 bytes, little-endian)
+        header_len_bytes = f.read(8)
+        if len(header_len_bytes) < 8:
+            raise ValueError("Invalid safetensors file: Header length missing.")
+        header_len = int.from_bytes(header_len_bytes, "little")
+        
+        # 2. Read and parse the JSON header
+        header_json = f.read(header_len).decode("utf-8")
+        header = json.loads(header_json)
+        
+        # 3. Binary data starts immediately after the header
+        data_start_offset = 8 + header_len
+        
+        state_dict = {}
+        for name, info in header.items():
+            if name == "__metadata__":
+                continue
+            
+            # info contains 'dtype', 'shape', 'data_offsets'
+            offsets = info.get("data_offsets")
+            if not offsets: continue
+            
+            start, end = offsets
+            dtype_str = info.get("dtype")
+            shape = info.get("shape")
+            
+            # 4. Map safetensors dtypes to torch dtypes
+            torch_dtype = {
+                "F32": torch.float32,
+                "F16": torch.float16,
+                "BF16": torch.bfloat16,
+                "I64": torch.int64,
+                "I32": torch.int32,
+                "I16": torch.int16,
+                "I8": torch.int8,
+                "U8": torch.uint8,
+                "BOOL": torch.bool,
+            }.get(dtype_str)
+            
+            if torch_dtype is None:
+                # Fallback or error
+                continue
+
+            # 5. Extract tensor data
+            f.seek(data_start_offset + start)
+            raw_bytes = f.read(end - start)
+            
+            # Use torch.frombuffer if available, else numpy fallback
+            try:
+                if dtype_str == "BF16":
+                    # Special handling for bfloat16 as frombuffer might not support it directly
+                    tensor = torch.frombuffer(bytearray(raw_bytes), dtype=torch.int16).view(torch.bfloat16).reshape(shape)
+                else:
+                    tensor = torch.frombuffer(bytearray(raw_bytes), dtype=torch_dtype).reshape(shape)
+            except Exception:
+                # Fallback for older torch versions
+                import numpy as np
+                np_dtype = {
+                    "F32": np.float32,
+                    "F16": np.float16,
+                    "I64": np.int64,
+                    "I32": np.int32,
+                    "I16": np.int16,
+                    "I8": np.int8,
+                    "U8": np.uint8,
+                    "BOOL": np.bool_,
+                }.get(dtype_str, np.float32)
+                
+                if dtype_str == "BF16":
+                    # Numpy doesn't have bfloat16, use int16 view
+                    tensor = torch.from_numpy(np.frombuffer(raw_bytes, dtype=np.int16).copy()).view(torch.bfloat16).reshape(shape)
+                else:
+                    tensor = torch.from_numpy(np.frombuffer(raw_bytes, dtype=np_dtype).copy()).reshape(shape)
+            
+            state_dict[name] = tensor.to(device)
+            
+        return state_dict
+
 # --- 2. ROBUST BYTE-LEVEL TOKENIZER ---
 class ByteTokenizer:
     def __init__(self):
@@ -69,6 +152,70 @@ class ByteTokenizer:
         filtered_bytes = bytearray([t for t in tokens if t < 256])
         return filtered_bytes.decode('utf-8', errors='replace')
 
+class QwenTokenizer:
+    """Minimal implementation of a Qwen/Tiktoken-style tokenizer."""
+    def __init__(self, model_dir):
+        self.vocab = {}
+        vocab_path = os.path.join(model_dir, "vocab.json")
+        if os.path.exists(vocab_path):
+            with open(vocab_path, "r", encoding="utf-8") as f:
+                self.vocab = json.load(f)
+        
+        self.inv_vocab = {v: k for k, v in self.vocab.items()}
+        self.vocab_size = len(self.vocab)
+        
+        # Special tokens for Qwen3
+        self.bos_token = self.vocab.get("<|endoftext|>", 151643)
+        self.eos_token = self.vocab.get("<|im_end|>", 151645)
+        self.pad_token = self.vocab.get("<|endoftext|>", 151643)
+
+    def encode(self, text: str, bos: bool = False, eos: bool = False) -> list[int]:
+        # Very simplified encoding: just try to match longest substrings from vocab
+        # In a real scenario, this should be BPE. For now, we'll do basic mapping.
+        # Since Qwen vocab is large, we'll just handle basic ASCII/UTF-8 bytes as fallbacks if possible
+        # or just use a placeholder if we don't want to implement full BPE here.
+        # Actually, for inference to work at all, we need proper BPE.
+        # Let's try to use a simple greedy approach for now, or just warn.
+        tokens = []
+        if bos: tokens.append(self.bos_token)
+        
+        # Fallback to UTF-8 bytes mapped to vocab if BPE not implemented
+        # Qwen vocab contains byte-level entries like "<0x00>" etc.
+        i = 0
+        while i < len(text):
+            found = False
+            for length in range(min(20, len(text) - i), 0, -1):
+                sub = text[i:i+length]
+                if sub in self.vocab:
+                    tokens.append(self.vocab[sub])
+                    i += length
+                    found = True
+                    break
+            if not found:
+                # Map to byte token if possible
+                byte_val = text[i].encode('utf-8')
+                for b in byte_val:
+                    byte_repr = f"<0x{b:02X}>"
+                    tokens.append(self.vocab.get(byte_repr, self.vocab.get(chr(b), 0)))
+                i += 1
+        
+        if eos: tokens.append(self.eos_token)
+        return tokens
+
+    def decode(self, tokens: list[int]) -> str:
+        res = ""
+        for t in tokens:
+            if t in self.inv_vocab:
+                s = self.inv_vocab[t]
+                if s.startswith("<0x") and s.endswith(">"):
+                    try:
+                        res += chr(int(s[3:5], 16))
+                    except:
+                        res += s
+                elif s not in ["<|endoftext|>", "<|im_start|>", "<|im_end|>"]:
+                    res += s
+        return res
+
 # --- 3. HARDWARE CAPABILITY MONITOR ---
 def get_device():
     if torch.cuda.is_available():
@@ -77,7 +224,7 @@ def get_device():
         return 'mps'
     return 'cpu'
 
-# --- 4. ADVANCED TRANSFORMER MODULES WITH REGULARIZATION ---
+# --- 4. ADVANCED TRANSFORMER MODULES ---
 class RMSNorm(nn.Module):
     def __init__(self, dim, eps=1e-6):
         super().__init__()
@@ -89,7 +236,7 @@ class RMSNorm(nn.Module):
         return x * torch.rsqrt(variance + self.eps) * self.weight
 
 class RoPE(nn.Module):
-    def __init__(self, dim, max_seq_len=512, theta=10000.0):
+    def __init__(self, dim, max_seq_len=4096, theta=10000.0):
         super().__init__()
         self.dim = dim
         inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
@@ -111,31 +258,34 @@ class RoPE(nn.Module):
         sin = self.sin_cached[start_pos : start_pos + T, :].unsqueeze(0).unsqueeze(1)
         return (x * cos) + (self._rotate_half(x) * sin)
 
-class Attention(nn.Module):
-    def __init__(self, n_embd, n_head, rope, dropout=0.15):
+class Qwen3Attention(nn.Module):
+    def __init__(self, config, rope):
         super().__init__()
-        self.n_head = n_head
-        self.head_size = n_embd // n_head
+        self.n_head = config["num_attention_heads"]
+        self.n_kv_head = config["num_key_value_heads"]
+        self.head_size = config.get("head_dim", config["hidden_size"] // self.n_head)
         self.rope = rope
         
-        self.wq = nn.Linear(n_embd, n_embd, bias=False)
-        self.wk = nn.Linear(n_embd, n_embd, bias=False)
-        self.wv = nn.Linear(n_embd, n_embd, bias=False)
-        self.wo = nn.Linear(n_embd, n_embd, bias=False)
+        self.q_proj = nn.Linear(config["hidden_size"], self.n_head * self.head_size, bias=False)
+        self.k_proj = nn.Linear(config["hidden_size"], self.n_kv_head * self.head_size, bias=False)
+        self.v_proj = nn.Linear(config["hidden_size"], self.n_kv_head * self.head_size, bias=False)
+        self.o_proj = nn.Linear(self.n_head * self.head_size, config["hidden_size"], bias=False)
         
-        # Drops attention paths and projection weights during backward passes
-        self.attn_dropout = nn.Dropout(dropout)
-        self.resid_dropout = nn.Dropout(dropout)
+        self.q_norm = RMSNorm(self.head_size, eps=config.get("rms_norm_eps", 1e-6))
+        self.k_norm = RMSNorm(self.head_size, eps=config.get("rms_norm_eps", 1e-6))
 
     def forward(self, x, mask=None, kv_cache=None):
         B, T, C = x.shape
         
-        q = self.wq(x).view(B, T, self.n_head, self.head_size).transpose(1, 2)
-        k = self.wk(x).view(B, T, self.n_head, self.head_size).transpose(1, 2)
-        v = self.wv(x).view(B, T, self.n_head, self.head_size).transpose(1, 2)
+        q = self.q_proj(x).view(B, T, self.n_head, self.head_size).transpose(1, 2)
+        k = self.k_proj(x).view(B, T, self.n_kv_head, self.head_size).transpose(1, 2)
+        v = self.v_proj(x).view(B, T, self.n_kv_head, self.head_size).transpose(1, 2)
+        
+        # QK Norm
+        q = self.q_norm(q)
+        k = self.k_norm(k)
         
         start_pos = 0 if kv_cache is None else kv_cache[0].shape[2]
-        
         q = self.rope(q, start_pos=start_pos)
         k = self.rope(k, start_pos=start_pos)
         
@@ -145,37 +295,129 @@ class Attention(nn.Module):
             v = torch.cat([v_prev, v], dim=2)
         new_kv_cache = (k, v)
         
-        total_T = k.shape[2]
-        
-        scores = (q @ k.transpose(-2, -1)) * (self.head_size ** -0.5)
+        # Support GQA: repeat k/v heads if necessary
+        if self.n_head != self.n_kv_head:
+            k_rep = k.repeat_interleave(self.n_head // self.n_kv_head, dim=1)
+            v_rep = v.repeat_interleave(self.n_head // self.n_kv_head, dim=1)
+        else:
+            k_rep, v_rep = k, v
+            
+        total_T = k_rep.shape[2]
+        scores = (q @ k_rep.transpose(-2, -1)) * (self.head_size ** -0.5)
         if mask is not None:
             scores = scores.masked_fill(mask[:T, :total_T] == 0, float('-inf'))
             
         scores = F.softmax(scores, dim=-1)
-        scores = self.attn_dropout(scores)
-        
-        out = scores @ v
-        out = out.transpose(1, 2).contiguous().view(B, T, C)
-        return self.resid_dropout(self.wo(out)), new_kv_cache
+        out = scores @ v_rep
+        out = out.transpose(1, 2).contiguous().view(B, T, self.n_head * self.head_size)
+        return self.o_proj(out), new_kv_cache
 
-class FeedForward(nn.Module):
-    def __init__(self, dim, hidden_dim=None, dropout=0.15):
+class Qwen3MLP(nn.Module):
+    def __init__(self, config):
         super().__init__()
-        if hidden_dim is None:
-            hidden_dim = int(2.7 * dim)
-            hidden_dim = 32 * ((hidden_dim + 32 - 1) // 32)
-            
-        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
-        self.w2 = nn.Linear(dim, hidden_dim, bias=False)
-        self.w3 = nn.Linear(hidden_dim, dim, bias=False)
-        self.resid_dropout = nn.Dropout(dropout)
+        self.gate_proj = nn.Linear(config["hidden_size"], config["intermediate_size"], bias=False)
+        self.up_proj = nn.Linear(config["hidden_size"], config["intermediate_size"], bias=False)
+        self.down_proj = nn.Linear(config["intermediate_size"], config["hidden_size"], bias=False)
 
     def forward(self, x):
-        return self.resid_dropout(self.w3(F.silu(self.w1(x)) * self.w2(x)))
+        return self.down_proj(F.silu(self.gate_proj(x)) * self.up_proj(x))
 
+class Qwen3Block(nn.Module):
+    def __init__(self, config, rope):
+        super().__init__()
+        self.self_attn = Qwen3Attention(config, rope)
+        self.mlp = Qwen3MLP(config)
+        self.input_layernorm = RMSNorm(config["hidden_size"], eps=config.get("rms_norm_eps", 1e-6))
+        self.post_attention_layernorm = RMSNorm(config["hidden_size"], eps=config.get("rms_norm_eps", 1e-6))
+
+    def forward(self, x, mask=None, kv_cache=None):
+        attn_out, new_cache = self.self_attn(self.input_layernorm(x), mask=mask, kv_cache=kv_cache)
+        x = x + attn_out
+        x = x + self.mlp(self.post_attention_layernorm(x))
+        return x, new_cache
+
+class Qwen3Model(nn.Module):
+    def __init__(self, config):
+        super().__init__()
+        self.config = config
+        self.embed_tokens = nn.Embedding(config["vocab_size"], config["hidden_size"])
+        self.rope = RoPE(dim=config.get("head_dim", config["hidden_size"] // config["num_attention_heads"]), 
+                         max_seq_len=config.get("max_position_embeddings", 4096),
+                         theta=config.get("rope_theta", 1000000.0))
+        
+        self.layers = nn.ModuleList([
+            Qwen3Block(config, self.rope) for _ in range(config["num_hidden_layers"])
+        ])
+        self.norm = RMSNorm(config["hidden_size"], eps=config.get("rms_norm_eps", 1e-6))
+        self.lm_head = nn.Linear(config["hidden_size"], config["vocab_size"], bias=False)
+        
+        if config.get("tie_word_embeddings", True):
+            self.lm_head.weight = self.embed_tokens.weight
+
+    def forward(self, idx, targets=None, kv_caches=None):
+        B, T = idx.shape
+        x = self.embed_tokens(idx)
+        
+        mask = torch.tril(torch.ones(T, T, device=idx.device)) if T > 1 else None
+        
+        new_kv_caches = []
+        for i, layer in enumerate(self.layers):
+            layer_cache = kv_caches[i] if kv_caches is not None else None
+            x, new_cache = layer(x, mask=mask, kv_cache=layer_cache)
+            new_kv_caches.append(new_cache)
+            
+        x = self.norm(x)
+        logits = self.lm_head(x)
+        
+        loss = None
+        if targets is not None:
+            loss = F.cross_entropy(logits.view(-1, self.config["vocab_size"]), targets.view(-1))
+            
+        return logits, loss, new_kv_caches
+
+    @torch.no_grad()
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, callback=None):
+        self.eval()
+        B, T = idx.shape
+        kv_caches = [None] * len(self.layers)
+        
+        # Initial forward pass
+        logits, _, kv_caches = self(idx, kv_caches=kv_caches)
+        next_token_logits = logits[:, -1, :].to(torch.float32) / (temperature + 1e-5)
+        
+        if top_k is not None:
+            v, _ = torch.topk(next_token_logits, min(top_k, self.config["vocab_size"]))
+            next_token_logits[next_token_logits < v[:, [-1]]] = -float('Inf')
+            
+        probs = F.softmax(next_token_logits, dim=-1)
+        next_token = torch.multinomial(probs, num_samples=1)
+        
+        generated = [next_token.item()]
+        if callback: callback(next_token.item())
+            
+        for _ in range(max_new_tokens - 1):
+            logits, _, kv_caches = self(next_token, kv_caches=kv_caches)
+            next_token_logits = logits[:, -1, :].to(torch.float32) / (temperature + 1e-5)
+            if top_k is not None:
+                v, _ = torch.topk(next_token_logits, min(top_k, self.config["vocab_size"]))
+                next_token_logits[next_token_logits < v[:, [-1]]] = -float('Inf')
+                
+            probs = F.softmax(next_token_logits, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
+            
+            generated.append(next_token.item())
+            if callback: callback(next_token.item())
+            
+            if next_token.item() in [151643, 151645]: # End tokens
+                break
+                
+        return generated
+
+# --- 5. LEGACY/TRAINING ARCHITECTURE ---
 class TransformerBlock(nn.Module):
     def __init__(self, n_embd, n_head, rope, dropout=0.15):
         super().__init__()
+        # Simplified Attention for training
         self.attention = Attention(n_embd, n_head, rope, dropout=dropout)
         self.ffwd = FeedForward(n_embd, dropout=dropout)
         self.norm1 = RMSNorm(n_embd)
@@ -187,90 +429,97 @@ class TransformerBlock(nn.Module):
         x = x + self.ffwd(self.norm2(x))
         return x, new_cache
 
-# --- 5. THE CAUSAL AUTOREGRESSIVE DECODER ARCHITECTURE ---
+class Attention(nn.Module):
+    def __init__(self, n_embd, n_head, rope, dropout=0.15):
+        super().__init__()
+        self.n_head = n_head
+        self.head_size = n_embd // n_head
+        self.rope = rope
+        self.wq = nn.Linear(n_embd, n_embd, bias=False)
+        self.wk = nn.Linear(n_embd, n_embd, bias=False)
+        self.wv = nn.Linear(n_embd, n_embd, bias=False)
+        self.wo = nn.Linear(n_embd, n_embd, bias=False)
+        self.attn_dropout = nn.Dropout(dropout)
+        self.resid_dropout = nn.Dropout(dropout)
+
+    def forward(self, x, mask=None, kv_cache=None):
+        B, T, C = x.shape
+        q = self.wq(x).view(B, T, self.n_head, self.head_size).transpose(1, 2)
+        k = self.wk(x).view(B, T, self.n_head, self.head_size).transpose(1, 2)
+        v = self.wv(x).view(B, T, self.n_head, self.head_size).transpose(1, 2)
+        start_pos = 0 if kv_cache is None else kv_cache[0].shape[2]
+        q = self.rope(q, start_pos=start_pos)
+        k = self.rope(k, start_pos=start_pos)
+        if kv_cache is not None:
+            k_prev, v_prev = kv_cache
+            k = torch.cat([k_prev, k], dim=2); v = torch.cat([v_prev, v], dim=2)
+        new_kv_cache = (k, v)
+        total_T = k.shape[2]
+        scores = (q @ k.transpose(-2, -1)) * (self.head_size ** -0.5)
+        if mask is not None: scores = scores.masked_fill(mask[:T, :total_T] == 0, float('-inf'))
+        scores = F.softmax(scores, dim=-1); scores = self.attn_dropout(scores)
+        out = scores @ v; out = out.transpose(1, 2).contiguous().view(B, T, C)
+        return self.resid_dropout(self.wo(out)), new_kv_cache
+
+class FeedForward(nn.Module):
+    def __init__(self, dim, hidden_dim=None, dropout=0.15):
+        super().__init__()
+        if hidden_dim is None: hidden_dim = int(2.7 * dim); hidden_dim = 32 * ((hidden_dim + 32 - 1) // 32)
+        self.w1 = nn.Linear(dim, hidden_dim, bias=False)
+        self.w2 = nn.Linear(dim, hidden_dim, bias=False)
+        self.w3 = nn.Linear(hidden_dim, dim, bias=False)
+        self.resid_dropout = nn.Dropout(dropout)
+    def forward(self, x): return self.resid_dropout(self.w3(F.silu(self.w1(x)) * self.w2(x)))
+
 class TermuxSLM(nn.Module):
     def __init__(self, vocab_size=259, n_embd=128, n_head=4, n_layer=4, block_size=128, dropout=0.15):
         super().__init__()
         self.vocab_size = vocab_size
         self.block_size = block_size
         self.token_embedding_table = nn.Embedding(vocab_size, n_embd)
-        
         self.rope = RoPE(dim=n_embd // n_head, max_seq_len=block_size)
-        self.layers = nn.ModuleList([
-            TransformerBlock(n_embd, n_head, self.rope, dropout=dropout) for _ in range(n_layer)
-        ])
+        self.layers = nn.ModuleList([TransformerBlock(n_embd, n_head, self.rope, dropout=dropout) for _ in range(n_layer)])
         self.final_norm = RMSNorm(n_embd)
         self.lm_head = nn.Linear(n_embd, vocab_size, bias=False)
-        
         self.token_embedding_table.weight = self.lm_head.weight
         self.register_buffer('tril', torch.tril(torch.ones(block_size, block_size)), persistent=False)
 
     def forward(self, idx, targets=None, kv_caches=None):
         B, T = idx.shape
         x = self.token_embedding_table(idx)
-        
         mask = self.tril[:T, :T] if T > 1 else None
-        
         new_kv_caches = []
         for i, layer in enumerate(self.layers):
             layer_cache = kv_caches[i] if kv_caches is not None else None
             x, new_cache = layer(x, mask=mask, kv_cache=layer_cache)
             new_kv_caches.append(new_cache)
-            
-        x = self.final_norm(x)
-        logits = self.lm_head(x)
-        
-        loss = None
-        if targets is not None:
-            loss = F.cross_entropy(logits.view(-1, self.vocab_size), targets.view(-1))
-            
+        x = self.final_norm(x); logits = self.lm_head(x)
+        loss = F.cross_entropy(logits.view(-1, self.vocab_size), targets.view(-1)) if targets is not None else None
         return logits, loss, new_kv_caches
 
     @torch.no_grad()
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, callback=None):
+        # Implementation similar to Qwen3Model.generate but using self.vocab_size
         self.eval()
-        B, T = idx.shape
         kv_caches = [None] * len(self.layers)
-        
-        if T >= self.block_size:
-            idx = idx[:, -max(1, self.block_size - 32):]
-            T = idx.shape[1]
-            
-        max_new_tokens = min(max_new_tokens, self.block_size - T)
-        if max_new_tokens <= 0:
-            return []
-            
         logits, _, kv_caches = self(idx, kv_caches=kv_caches)
-        next_token_logits = logits[:, -1, :] / (temperature + 1e-5)
-        
+        next_token_logits = logits[:, -1, :].to(torch.float32) / (temperature + 1e-5)
         if top_k is not None:
             v, _ = torch.topk(next_token_logits, min(top_k, self.vocab_size))
             next_token_logits[next_token_logits < v[:, [-1]]] = -float('Inf')
-            
-        probs = F.softmax(next_token_logits, dim=-1)
-        next_token = torch.multinomial(probs, num_samples=1)
-        
+        probs = F.softmax(next_token_logits, dim=-1); next_token = torch.multinomial(probs, num_samples=1)
         generated = [next_token.item()]
-        if callback:
-            callback(next_token.item())
-            
+        if callback: callback(next_token.item())
         for _ in range(max_new_tokens - 1):
             logits, _, kv_caches = self(next_token, kv_caches=kv_caches)
-            next_token_logits = logits[:, -1, :] / (temperature + 1e-5)
+            next_token_logits = logits[:, -1, :].to(torch.float32) / (temperature + 1e-5)
             if top_k is not None:
                 v, _ = torch.topk(next_token_logits, min(top_k, self.vocab_size))
                 next_token_logits[next_token_logits < v[:, [-1]]] = -float('Inf')
-                
-            probs = F.softmax(next_token_logits, dim=-1)
-            next_token = torch.multinomial(probs, num_samples=1)
-            
+            probs = F.softmax(next_token_logits, dim=-1); next_token = torch.multinomial(probs, num_samples=1)
             generated.append(next_token.item())
-            if callback:
-                callback(next_token.item())
-                
-            if next_token.item() == 258: # End-of-Stream boundary match
-                break
-                
+            if callback: callback(next_token.item())
+            if next_token.item() == 258: break
         return generated
 
 # --- 6. MULTI-SOURCE CORPUS COMPILATION PIPELINE ---
@@ -341,7 +590,10 @@ if __name__ == "__main__":
     print("  Professional Continual Learning Engine (ARM Mobile Architecture) ")
     print("================================================================")
     
-    config = load_config()
+    model_dir = "models/native_slm"
+    os.makedirs(model_dir, exist_ok=True)
+    config_path = os.path.join(model_dir, "config.json")
+    config = load_config(config_path if os.path.exists(config_path) else "model_config.json")
     torch.set_num_threads(config["num_threads"])
     torch.set_num_interop_threads(1)
     device = get_device()
@@ -386,8 +638,8 @@ if __name__ == "__main__":
     optimizer = torch.optim.AdamW(model.parameters(), lr=config["learning_rate"], weight_decay=config.get("weight_decay", 0.1))
     
     # --- NON-DESTRUCTIVE RUNTIME RESUMPTION GUARD ---
-    checkpoint_tar_path = 'models/native_slm_checkpoint.tar' # Main session snapshot container
-    active_runtime_weights = 'models/native_slm.pt'           # Target weight path consumed by Flask Server
+    checkpoint_tar_path = os.path.join(model_dir, 'checkpoint.tar') # Main session snapshot container
+    active_runtime_weights = os.path.join(model_dir, 'model.pt')           # Target weight path consumed by Flask Server
     start_step = 0
     
     if os.path.exists(checkpoint_tar_path):
@@ -452,7 +704,7 @@ if __name__ == "__main__":
             
             # Save raw model weights file explicitly for the Flask runtime server
             torch.save(model.state_dict(), active_runtime_weights)
-            save_config(config)
+            save_config(config, config_path)
             print(f"--> Snapshot saved successfully to '{checkpoint_tar_path}' and '{active_runtime_weights}'.")
             
     # Final iteration milestone save
@@ -463,5 +715,5 @@ if __name__ == "__main__":
         'loss': loss.item(),
     }, checkpoint_tar_path)
     torch.save(model.state_dict(), active_runtime_weights)
-    save_config(config)
+    save_config(config, config_path)
     print(f"\n[+] Milestone completed! Session data successfully frozen at Step {total_target_iters}.")

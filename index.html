@@ -505,6 +505,7 @@
             display: flex;
             flex-direction: column;
             gap: 8px;
+            width: 100%;
         }
 
         .control-label {
@@ -671,11 +672,10 @@
             flex-direction: column;
             gap: 6px;
             box-shadow: inset 0 2px 8px rgba(0,0,0,0.5);
-            /* --- ENABLES TEXT SELECTION AND COPYING --- */
-	    user-select: text !important;
- 	    -webkit-user-select: text !important; /* Safari, Chrome, iOS, and Termux browsers */
-   	    -moz-user-select: text !important;    /* Firefox */
- 	    -ms-user-select: text !important;  
+            user-select: text !important;
+            -webkit-user-select: text !important;
+            -moz-user-select: text !important;
+            -ms-user-select: text !important;  
         }
 
         .train-sidebar {
@@ -742,7 +742,7 @@
             border-color: var(--primary);
         }
 
-        /* --- DATASET PANELS --- */
+        /* --- DATASET/PANELS LAYOUT --- */
         .dataset-layout {
             display: flex;
             flex-direction: column;
@@ -1020,25 +1020,29 @@
 
     <div class="app-container">
         <div class="sidebar">
-            <div class="nav-item active" onclick="switchTab('chat')" title="Chat Panel" id="nav-chat">
+            <div class="nav-item active" onclick="switchTab('chat')" title="Chat Playground" id="nav-chat">
                 <i class="fa-regular fa-comment-dots"></i>
             </div>
-            <div class="nav-item" onclick="switchTab('train')" title="Training Panel" id="nav-train">
+            <div class="nav-item" onclick="switchTab('history')" title="Chat History" id="nav-history">
+                <i class="fa-solid fa-clock-rotate-left"></i>
+            </div>
+            <div class="nav-item" onclick="switchTab('train')" title="Training Dashboard" id="nav-train">
                 <i class="fa-solid fa-sliders"></i>
             </div>
-            <div class="nav-item" onclick="switchTab('dataset')" title="Dataset Manager" id="nav-dataset">
-                <i class="fa-regular fa-file-lines"></i>
+            <div class="nav-item" onclick="switchTab('models')" title="Model Manager" id="nav-models">
+                <i class="fa-solid fa-cubes"></i>
             </div>
         </div>
 
         <div class="content-area">
             
+            <!-- CHAT PLAYGROUND TAB -->
             <div class="tab-content active" id="tab-chat">
                 <div class="chat-layout">
                     <div class="chat-main">
                         <div class="chat-header">
                             <span style="font-family: 'Outfit'; font-weight: 600; display: flex; align-items: center; gap: 8px; font-size: 14px;">
-                                <i class="fa-solid fa-terminal" style="color: var(--secondary)"></i> Sandbox Playground
+                                <i class="fa-solid fa-terminal" style="color: var(--secondary)"></i> Sandbox Playground (<span id="loadedModelLabel" style="color:var(--primary)">native_slm</span>)
                             </span>
                             <button class="settings-toggle-btn" onclick="toggleMobileSettings()">
                                 <i class="fa-solid fa-sliders"></i> Config
@@ -1049,7 +1053,7 @@
                             <div class="chat-empty" id="chatEmpty">
                                 <i class="fa-solid fa-wand-magic-sparkles"></i>
                                 <h2>Personal SLM Assistant</h2>
-                                <p style="font-size: 13px; max-width: 440px;">A native PyTorch Small Language Model optimized for mobile performance, trained on-device to provide intelligent and responsive English conversations.</p>
+                                <p style="font-size: 13px; max-width: 440px;">A native PyTorch Small Language Model optimized for mobile performance, trained on-device to provide intelligent and responsive conversations.</p>
                             </div>
                         </div>
                         
@@ -1122,13 +1126,32 @@
                             <div style="display:flex; justify-content:space-between;"><span style="color:var(--text-muted)">Inference Device:</span><span id="deviceTextDetail" style="font-family:'JetBrains Mono'; color:var(--secondary)">CPU</span></div>
                         </div>
 
-                        <button class="action-btn btn-outline" style="font-size: 13px; padding: 10px; margin-top: auto;" onclick="clearChat()">
-                            <i class="fa-solid fa-trash-can"></i> Clear Conversation
+                        <button class="action-btn btn-primary" style="font-size: 13px; padding: 10px; margin-top: auto;" onclick="clearChat()">
+                            <i class="fa-solid fa-plus"></i> New Conversation
                         </button>
                     </div>
                 </div>
             </div>
 
+            <!-- CHAT HISTORY TAB -->
+            <div class="tab-content" id="tab-history">
+                <div class="dataset-layout" style="overflow-y: auto;">
+                    <div style="display:flex; justify-content:space-between; align-items:center; gap: 10px;">
+                        <div>
+                            <h2 class="section-title" style="font-size:16px;"><i class="fa-solid fa-clock-rotate-left"></i> Chat History</h2>
+                            <p style="font-size:12px; color:var(--text-muted); margin-top:2px;">View and restore your previous conversations.</p>
+                        </div>
+                        <button class="action-btn btn-outline" style="width:auto; padding:8px 16px; font-size:13px;" onclick="clearAllSessions()">
+                            <i class="fa-solid fa-trash-can"></i> Clear All History
+                        </button>
+                    </div>
+                    <div id="historyList" style="display: flex; flex-direction: column; gap: 12px; margin-top: 16px;">
+                        <!-- History sessions rendered here -->
+                    </div>
+                </div>
+            </div>
+
+            <!-- TRAINING DASHBOARD TAB -->
             <div class="tab-content" id="tab-train">
                 <div class="train-layout">
                     <div class="train-main">
@@ -1225,21 +1248,84 @@
                 </div>
             </div>
 
-            <div class="tab-content" id="tab-dataset">
-                <div class="dataset-layout">
+            <!-- MODEL MANAGER TAB -->
+            <div class="tab-content" id="tab-models">
+                <div class="dataset-layout" style="overflow-y: auto;">
                     <div style="display:flex; justify-content:space-between; align-items:center; gap: 10px;">
                         <div>
-                            <h2 class="section-title" style="font-size:16px;"><i class="fa-regular fa-file-code"></i> Corpus Manager</h2>
-                            <p class="mobile-hide" style="font-size:12px; color:var(--text-muted); margin-top:2px;">Edit dataset files ('training_data.txt') to compute direct vocabulary byte distributions.</p>
+                            <h2 class="section-title" style="font-size:16px;"><i class="fa-solid fa-cubes"></i> Model Module Manager</h2>
+                            <p style="font-size:12px; color:var(--text-muted); margin-top:2px;">Select, download, or delete models stored on your device.</p>
                         </div>
-                        <button class="action-btn btn-primary" style="width:auto; padding:8px 16px; font-size:13px;" onclick="saveDataset()">
-                            <i class="fa-regular fa-floppy-disk"></i> Save Corpus
-                        </button>
                     </div>
-                    <textarea class="dataset-textarea" id="datasetText" placeholder="Loading file stream dataset allocations..."></textarea>
-                    <div style="font-size: 11px; color: var(--text-muted); display:flex; justify-content:space-between; gap: 10px;">
-                        <span id="datasetSizeText">Chars: 0</span>
-                        <span style="text-align: right;">Pre-allocations limited to 100k blocks.</span>
+                    
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-top: 16px; align-items: start;">
+                        <!-- Left side: Download model -->
+                        <div class="stat-card" style="gap: 12px; padding: 20px; background: rgba(255,255,255,0.01);">
+                            <h3 class="section-title" style="font-size: 14px;"><i class="fa-solid fa-cloud-arrow-down"></i> Download New Model</h3>
+                            <p style="font-size: 12px; color: var(--text-muted);">Download a model directly from Hugging Face. For mobile devices, <b>GGUF Mode</b> is highly recommended to run quantized models efficiently and prevent system UI crashes.</p>
+                            
+                            <!-- Mode selection -->
+                            <div class="control-group" style="margin-top: 4px;">
+                                <label class="control-label">Download Mode</label>
+                                <div style="display: flex; gap: 10px; margin-top: 4px;">
+                                    <label style="display: flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; color: var(--text-main);">
+                                        <input type="radio" name="downloadMode" value="gguf" checked onchange="toggleDownloadMode()" style="accent-color: var(--primary);"> GGUF Mode (CPU Inference)
+                                    </label>
+                                    <label style="display: flex; align-items: center; gap: 6px; font-size: 13px; cursor: pointer; color: var(--text-muted);" id="lblPyTorchMode">
+                                        <input type="radio" name="downloadMode" value="pytorch" onchange="toggleDownloadMode()" style="accent-color: var(--primary);"> PyTorch Mode (Training)
+                                    </label>
+                                </div>
+                            </div>
+                            
+                            <!-- Recommended GGUF Models -->
+                            <div class="control-group" id="recommendedModelsGroup" style="margin-top: 4px;">
+                                <label class="control-label">Recommended Mobile GGUF Models</label>
+                                <div style="display: flex; flex-wrap: wrap; gap: 6px; margin-top: 6px;" id="recommendedShortcuts">
+                                    <span class="suggestion-chip" onclick="applyModelPreset('Qwen/Qwen2.5-0.5B-Instruct-GGUF', 'qwen2.5-0.5b-instruct-q4_k_m.gguf')">Qwen2.5 0.5B Q4 (~398MB)</span>
+                                    <span class="suggestion-chip" onclick="applyModelPreset('unsloth/Llama-3.2-1B-Instruct-GGUF', 'Llama-3.2-1B-Instruct-Q4_K_M.gguf')">Llama3.2 1B Q4 (~740MB)</span>
+                                    <span class="suggestion-chip" onclick="applyModelPreset('Qwen/Qwen2.5-1.5B-Instruct-GGUF', 'qwen2.5-1.5b-instruct-q4_k_m.gguf')">Qwen2.5 1.5B Q4 (~1.1GB)</span>
+                                    <span class="suggestion-chip" onclick="applyModelPreset('bartowski/Llama-3.2-3B-Instruct-GGUF', 'Llama-3.2-3B-Instruct-Q4_K_M.gguf')">Llama3.2 3B Q4 (~2.2GB)</span>
+                                </div>
+                            </div>
+                            
+                            <!-- Repo Input & Search -->
+                            <div class="control-group" style="margin-top: 4px;">
+                                <label class="control-label" id="repoInputLabel">Hugging Face URL or Repo ID</label>
+                                <div style="display: flex; gap: 8px; width: 100%;">
+                                    <input type="text" class="input-number" id="hfUrlInput" placeholder="Paste link or repo ID here..." style="font-family: inherit; flex: 1;" oninput="handleUrlInput()">
+                                    <button class="action-btn btn-outline" id="scanRepoBtn" onclick="scanRepoFiles()" style="width: auto; padding: 0 16px; flex-shrink: 0; margin-top: 0;">
+                                        <i class="fa-solid fa-magnifying-glass"></i> Scan
+                                    </button>
+                                </div>
+                            </div>
+                            
+                            <!-- GGUF File Selector -->
+                            <div class="control-group" id="ggufFileSelectGroup" style="display: none; margin-top: 4px;">
+                                <label class="control-label">Available GGUF Files</label>
+                                <select class="input-number" id="ggufFileSelect" style="font-family: inherit; font-size: 13px; padding: 8px;">
+                                    <!-- Populated dynamically -->
+                                </select>
+                            </div>
+                            
+                            <button class="action-btn btn-primary" id="downloadModelBtn" onclick="downloadModel()" style="margin-top: 8px;">
+                                <i class="fa-solid fa-download"></i> Download Model
+                            </button>
+                        </div>
+                        
+                        <!-- Right side: Model status & logs -->
+                        <div class="stat-card" style="gap: 12px; padding: 20px; background: rgba(255,255,255,0.01);">
+                            <h3 class="section-title" style="font-size: 14px;"><i class="fa-solid fa-terminal"></i> Download & Operation Logs</h3>
+                            <div class="console-container" id="modelConsoleLogs" style="height: 165px;">
+                                <div>[SYSTEM] Operation console active. Ready...</div>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <div style="margin-top: 24px;">
+                        <h3 class="section-title" style="font-size: 14px; margin-bottom: 12px;"><i class="fa-solid fa-list"></i> Installed Models</h3>
+                        <div id="modelsList" style="display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 16px;">
+                            <!-- Installed models rendered here -->
+                        </div>
                     </div>
                 </div>
             </div>
@@ -1251,11 +1337,15 @@
         let currentTab = 'chat';
         let statusInterval = null;
         let lossChartObj = null;
+        let chatHistory = [];
+        let currentSessionId = null;
 
         window.addEventListener('DOMContentLoaded', () => {
             initChart();
             fetchStatus();
-            fetchDataset();
+            // Automatically fetch models on startup
+            fetchModels();
+            toggleDownloadMode();
             statusInterval = setInterval(fetchStatus, 1500);
             
             const chatInput = document.getElementById('chatInput');
@@ -1269,6 +1359,12 @@
                 const elem = document.getElementById(id);
                 elem.addEventListener('change', saveInferenceConfig);
             });
+
+            // Initialize chatHistory from localStorage if possible
+            const sessions = JSON.parse(localStorage.getItem('slm_chat_sessions') || '[]');
+            if (sessions.length > 0) {
+                restoreSession(sessions[0].id);
+            }
         });
 
         async function saveInferenceConfig() {
@@ -1315,6 +1411,12 @@
             
             if (tabId === 'train' && lossChartObj) {
                 setTimeout(() => { lossChartObj.resize(); lossChartObj.update(); }, 50);
+            }
+            if (tabId === 'models') {
+                fetchModels();
+            }
+            if (tabId === 'history') {
+                renderHistoryList();
             }
         }
 
@@ -1389,9 +1491,10 @@
                 
                 document.getElementById('deviceText').innerText = data.device;
                 document.getElementById('deviceTextDetail').innerText = data.device;
-                document.getElementById('blockSizeText').innerText = data.config.block_size;
-                document.getElementById('nEmbdText').innerText = data.config.n_embd;
-                document.getElementById('nLayerText').innerText = data.config.n_layer;
+                document.getElementById('blockSizeText').innerText = data.config.block_size || 'N/A';
+                document.getElementById('nEmbdText').innerText = data.config.n_embd || data.config.hidden_size || 'N/A';
+                document.getElementById('nLayerText').innerText = data.config.n_layer || data.config.num_hidden_layers || 'N/A';
+                document.getElementById('loadedModelLabel').innerText = data.active_model;
                 
                 const formattedParams = (data.param_count / 1000000).toFixed(2) + 'M';
                 document.getElementById('paramCountText').innerText = `${data.param_count.toLocaleString()} (${formattedParams})`;
@@ -1401,7 +1504,7 @@
                     inputs.forEach(input => {
                         const elem = document.getElementById(`cfg-${input}`);
                         if (elem && document.activeElement !== elem) {
-                            elem.value = data.config[input];
+                            elem.value = data.config[input] || '';
                         }
                     });
                     
@@ -1445,17 +1548,19 @@
                     window.inferenceSettingsLoaded = true;
                 }
 
-                const consoleDiv = document.getElementById('consoleLogs');
-		const isScrolledToBottom = consoleDiv.clientHeight + consoleDiv.scrollTop >= consoleDiv.scrollHeight - 20;
-
-		// Only update the logs if you aren't currently selecting text inside the console
-		if (!(window.getSelection().toString().length > 0 && consoleDiv.contains(window.getSelection().anchorNode))) {
-	            consoleDiv.innerHTML = data.logs.map(log => `<div>${log}</div>`).join('');
-		    if (isScrolledToBottom) {
-		        consoleDiv.scrollTop = consoleDiv.scrollHeight;
-		    }
-		}
-
+                const logsHTML = data.logs.map(log => `<div>${log}</div>`).join('');
+                ['consoleLogs', 'modelConsoleLogs'].forEach(id => {
+                    const consoleDiv = document.getElementById(id);
+                    if (consoleDiv) {
+                        const isScrolledToBottom = consoleDiv.clientHeight + consoleDiv.scrollTop >= consoleDiv.scrollHeight - 20;
+                        if (!(window.getSelection().toString().length > 0 && consoleDiv.contains(window.getSelection().anchorNode))) {
+                            consoleDiv.innerHTML = logsHTML;
+                            if (isScrolledToBottom) {
+                                consoleDiv.scrollTop = consoleDiv.scrollHeight;
+                            }
+                        }
+                    }
+                });
 
                 if (data.losses_history.length > 0) {
                     let sampleInterval = Math.max(1, Math.floor(data.losses_history.length / 300));
@@ -1482,37 +1587,6 @@
             } catch (err) {
                 document.getElementById('statusText').innerText = 'Offline';
                 document.getElementById('statusChip').className = 'status-chip';
-            }
-        }
-
-        async function fetchDataset() {
-            try {
-                const response = await fetch('/api/dataset');
-                const data = await response.json();
-                document.getElementById('datasetText').value = data.text;
-                document.getElementById('datasetSizeText').innerText = `Chars: ${data.text.length}${data.truncated ? '+' : ''}`;
-            } catch (err) {
-                console.error("Dataset connection failed:", err);
-            }
-        }
-
-        async function saveDataset() {
-            const newText = document.getElementById('datasetText').value;
-            try {
-                const response = await fetch('/api/dataset', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ text: newText })
-                });
-                const res = await response.json();
-                if (res.status === 'success') {
-                    alert('Dataset compiled and loaded successfully!');
-                    fetchDataset();
-                } else {
-                    alert('Compilation error: ' + res.error);
-                }
-            } catch (err) {
-                alert('Connection failure: ' + err);
             }
         }
 
@@ -1555,9 +1629,454 @@
             }
         }
 
+        /* --- MODEL MANAGER API CALLS --- */
+        async function fetchModels() {
+            try {
+                const response = await fetch('/api/models');
+                const data = await response.json();
+                renderModelsList(data.models, data.active_model);
+            } catch (err) {
+                console.error("Failed to fetch models:", err);
+            }
+        }
+
+        function renderModelsList(models, activeModel) {
+            const listDiv = document.getElementById('modelsList');
+            listDiv.innerHTML = '';
+            
+            models.forEach(model => {
+                const isActive = model.name === activeModel;
+                const card = document.createElement('div');
+                card.className = 'stat-card';
+                if (isActive) {
+                    card.style.border = '1px solid var(--primary)';
+                    card.style.boxShadow = '0 0 15px var(--border-glow)';
+                    card.style.background = 'rgba(99, 102, 241, 0.05)';
+                } else {
+                    card.style.background = 'rgba(255, 255, 255, 0.02)';
+                }
+                card.style.padding = '16px';
+                card.style.borderRadius = '14px';
+                card.style.display = 'flex';
+                card.style.flexDirection = 'column';
+                card.style.gap = '10px';
+                
+                // Config details
+                let details = '';
+                if (model.type === 'gguf') {
+                    details = `
+                        <div><span style="color:var(--text-muted)">Type:</span> C++ Engine / GGUF</div>
+                        <div><span style="color:var(--text-muted)">Engine:</span> llama.cpp (High Perf)</div>
+                        <div><span style="color:var(--text-muted)">Format:</span> Quantized GGUF</div>
+                        <div><span style="color:var(--text-muted)">Context:</span> 2048 tokens</div>
+                    `;
+                } else if (model.type === 'qwen3') {
+                    details = `
+                        <div><span style="color:var(--text-muted)">Type:</span> Qwen3 / HuggingFace</div>
+                        <div><span style="color:var(--text-muted)">Layers:</span> ${model.config.num_hidden_layers || 'N/A'}</div>
+                        <div><span style="color:var(--text-muted)">Heads:</span> ${model.config.num_attention_heads || 'N/A'}</div>
+                        <div><span style="color:var(--text-muted)">Hidden Size:</span> ${model.config.hidden_size || 'N/A'}</div>
+                    `;
+                } else {
+                    details = `
+                        <div><span style="color:var(--text-muted)">Type:</span> Native SLM</div>
+                        <div><span style="color:var(--text-muted)">Layers:</span> ${model.config.n_layer || 'N/A'}</div>
+                        <div><span style="color:var(--text-muted)">Heads:</span> ${model.config.n_head || 'N/A'}</div>
+                        <div><span style="color:var(--text-muted)">Embedding:</span> ${model.config.n_embd || 'N/A'}</div>
+                    `;
+                }
+                
+                const weightsStatus = model.weights_file 
+                    ? `<span style="color:var(--accent-green)">Installed (${model.weights_file})</span>` 
+                    : `<span style="color:var(--text-muted)">No weights (Fresh)</span>`;
+                    
+                const actionBtn = isActive 
+                    ? `<button class="action-btn btn-outline" style="border-color:var(--accent-green); color:var(--accent-green); cursor:default;" disabled><i class="fa-solid fa-circle-check"></i> Loaded & Active</button>`
+                    : `<button class="action-btn btn-primary" onclick="selectModel('${model.name}')"><i class="fa-solid fa-circle-play"></i> Load Model</button>`;
+                    
+                const deleteBtn = (model.name === 'native_slm' || isActive)
+                    ? ''
+                    : `<button class="action-btn btn-outline" style="color:var(--accent-red); border-color:rgba(239, 68, 68, 0.2);" onclick="deleteModel('${model.name}')"><i class="fa-solid fa-trash"></i> Delete</button>`;
+                    
+                card.innerHTML = `
+                    <div style="display:flex; justify-content:space-between; align-items:center;">
+                        <span style="font-family:'Outfit'; font-weight:700; font-size:16px;">${model.name}</span>
+                        ${isActive ? '<span style="font-size:11px; padding:3px 8px; border-radius:50px; background:var(--primary); font-weight:600;">ACTIVE</span>' : ''}
+                    </div>
+                    <div style="font-size:12px; line-height:1.5; display:flex; flex-direction:column; gap:4px;">
+                        ${details}
+                        <div><span style="color:var(--text-muted)">Weights:</span> ${weightsStatus}</div>
+                    </div>
+                    <div style="display:flex; gap:10px; margin-top:8px;">
+                        <div style="flex:1;">${actionBtn}</div>
+                        ${deleteBtn ? `<div style="width:100px;">${deleteBtn}</div>` : ''}
+                    </div>
+                `;
+                
+                listDiv.appendChild(card);
+            });
+        }
+
+        async function selectModel(modelName) {
+            try {
+                const response = await fetch('/api/models/select', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ model_name: modelName })
+                });
+                const res = await response.json();
+                if (res.status === 'success') {
+                    alert(res.message);
+                    window.inferenceSettingsLoaded = false; // reload settings sliders for the new model
+                    fetchStatus();
+                    fetchModels();
+                    // Clear active chat to prevent history shape mismatch
+                    clearChat();
+                } else {
+                    alert(res.error);
+                }
+            } catch (err) {
+                alert("Connection failed: " + err);
+            }
+        }
+
+        async function deleteModel(modelName) {
+            if (confirm(`Are you sure you want to permanently delete the model folder for '${modelName}'?`)) {
+                try {
+                    const response = await fetch('/api/models/delete', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ model_name: modelName })
+                    });
+                    const res = await response.json();
+                    if (res.status === 'success') {
+                        alert(res.message);
+                        fetchModels();
+                    } else {
+                        alert(res.error);
+                    }
+                } catch (err) {
+                    alert("Connection failed: " + err);
+                }
+            }
+        }
+
+        function toggleDownloadMode() {
+            const mode = document.querySelector('input[name="downloadMode"]:checked').value;
+            const ggufGroup = document.getElementById('ggufFileSelectGroup');
+            const recGroup = document.getElementById('recommendedModelsGroup');
+            const scanBtn = document.getElementById('scanRepoBtn');
+            const repoLabel = document.getElementById('repoInputLabel');
+            const repoInput = document.getElementById('hfUrlInput');
+            const lblPyTorch = document.getElementById('lblPyTorchMode');
+            
+            if (mode === 'gguf') {
+                recGroup.style.display = 'block';
+                scanBtn.style.display = 'block';
+                repoLabel.innerText = "Hugging Face URL or Repo ID (GGUF)";
+                lblPyTorch.style.color = "var(--text-muted)";
+            } else {
+                ggufGroup.style.display = 'none';
+                recGroup.style.display = 'none';
+                scanBtn.style.display = 'none';
+                repoLabel.innerText = "Hugging Face URL or Repo ID (Safetensors)";
+                lblPyTorch.style.color = "var(--text-main)";
+            }
+        }
+
+        function handleUrlInput() {
+            const input = document.getElementById('hfUrlInput').value.trim();
+            if (!input) return;
+
+            // Auto-detect GGUF if link contains GGUF or ends with .gguf
+            if (input.toLowerCase().includes('gguf')) {
+                const ggufRadio = document.querySelector('input[name="downloadMode"][value="gguf"]');
+                if (!ggufRadio.checked) {
+                    ggufRadio.checked = true;
+                    toggleDownloadMode();
+                }
+                
+                // If it's a repository link (not a direct file link), trigger scan
+                if (input.startsWith('http') && !input.toLowerCase().endsWith('.gguf') && !input.includes('/resolve/')) {
+                    // Debounce scan
+                    clearTimeout(window.scanTimeout);
+                    window.scanTimeout = setTimeout(() => scanRepoFiles(), 800);
+                }
+            } else if (input.toLowerCase().endsWith('.safetensors') || input.includes('model.safetensors')) {
+                 const ptRadio = document.querySelector('input[name="downloadMode"][value="pytorch"]');
+                 if (!ptRadio.checked) {
+                    ptRadio.checked = true;
+                    toggleDownloadMode();
+                }
+            }
+        }
+
+        function applyModelPreset(repo, filename) {
+            // Set mode to gguf
+            document.querySelector('input[name="downloadMode"][value="gguf"]').checked = true;
+            toggleDownloadMode();
+            document.getElementById('hfUrlInput').value = repo;
+            // Scan repository first
+            scanRepoFiles(filename);
+        }
+
+        async function scanRepoFiles(autoSelectFile = null) {
+            const repoInput = document.getElementById('hfUrlInput');
+            let repoId = repoInput.value.trim();
+            if (!repoId) {
+                return;
+            }
+            
+            // Clean up if it's a URL
+            if (repoId.includes("huggingface.co/")) {
+                const parts = repoId.split("huggingface.co/")[1].split("/");
+                if (parts.length >= 2) {
+                    repoId = `${parts[0]}/${parts[1]}`;
+                }
+            }
+            
+            const scanBtn = document.getElementById('scanRepoBtn');
+            const fileSelectGroup = document.getElementById('ggufFileSelectGroup');
+            const fileSelect = document.getElementById('ggufFileSelect');
+            
+            scanBtn.disabled = true;
+            scanBtn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> Scanning...';
+            
+            try {
+                const response = await fetch('/api/models/hf_list', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ repo_id: repoId })
+                });
+                const res = await response.json();
+                
+                if (res.status === 'success') {
+                    if (!res.files || res.files.length === 0) {
+                        // If no GGUF files, maybe it's not a GGUF repo
+                        fileSelectGroup.style.display = 'none';
+                    } else {
+                        fileSelect.innerHTML = '';
+                        res.files.forEach(file => {
+                            const option = document.createElement('option');
+                            const sizeText = file.size_mb > 0 ? ` (${file.size_mb} MB)` : (file.size_mb === 0 ? '' : ' (Size Unknown)');
+                            option.value = file.name;
+                            option.innerText = file.name + sizeText;
+                            fileSelect.appendChild(option);
+                        });
+                        
+                        fileSelectGroup.style.display = 'block';
+                        
+                        // Auto-select if a preset was clicked
+                        if (autoSelectFile) {
+                            for (let i = 0; i < fileSelect.options.length; i++) {
+                                if (fileSelect.options[i].value.toLowerCase() === autoSelectFile.toLowerCase() || 
+                                    fileSelect.options[i].value.toLowerCase().includes(autoSelectFile.toLowerCase())) {
+                                    fileSelect.selectedIndex = i;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                } else {
+                    console.warn("Scan failed: " + res.error);
+                    fileSelectGroup.style.display = 'none';
+                }
+            } catch (err) {
+                console.error("Scan request failed: " + err);
+                fileSelectGroup.style.display = 'none';
+            } finally {
+                scanBtn.disabled = false;
+                scanBtn.innerHTML = '<i class="fa-solid fa-magnifying-glass"></i> Scan';
+            }
+        }
+
+        async function downloadModel() {
+            const mode = document.querySelector('input[name="downloadMode"]:checked').value;
+            const input = document.getElementById('hfUrlInput');
+            const repo = input.value.trim();
+            if (!repo) {
+                alert("Please enter a Hugging Face Repository ID or URL.");
+                return;
+            }
+            
+            let downloadUrl = repo;
+            
+            if (mode === 'gguf') {
+                const fileSelect = document.getElementById('ggufFileSelect');
+                const fileSelectGroup = document.getElementById('ggufFileSelectGroup');
+                
+                // If we have a file selection group visible, use the selected file
+                if (fileSelectGroup.style.display !== 'none' && fileSelect.value) {
+                    let cleanRepo = repo;
+                    if (cleanRepo.includes("huggingface.co/")) {
+                        const parts = cleanRepo.split("huggingface.co/")[1].split("/");
+                        if (parts.length >= 2) {
+                            cleanRepo = `${parts[0]}/${parts[1]}`;
+                        }
+                    } else {
+                        // If it was just a repo ID, clean it
+                        const tokens = cleanRepo.split('/').filter(t => t);
+                        if (tokens.length >= 2) {
+                            cleanRepo = `${tokens[0]}/${tokens[1]}`;
+                        }
+                    }
+                    downloadUrl = `https://huggingface.co/${cleanRepo}/resolve/main/${fileSelect.value}`;
+                } else if (!repo.toLowerCase().endsWith('.gguf') && !repo.includes('/resolve/')) {
+                    // It's a repo but no file selected
+                    alert("Please click 'Scan' to retrieve GGUF files and select one before downloading.");
+                    return;
+                }
+            }
+            
+            try {
+                const response = await fetch('/api/models/download', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url: downloadUrl })
+                });
+                const res = await response.json();
+                if (res.status === 'success') {
+                    alert("Model download started in background. Monitor operation logs for progress.");
+                    if (mode === 'pytorch' || downloadUrl !== repo) {
+                        // input.value = ''; // Optionally clear
+                    }
+                } else {
+                    alert(res.error);
+                }
+            } catch (err) {
+                alert("Connection failed: " + err);
+            }
+        }
+
+        /* --- CHAT PLAYGROUND / CHAT HISTORY LOGIC --- */
+        function saveCurrentSession() {
+            if (chatHistory.length === 0) return;
+            
+            let sessions = JSON.parse(localStorage.getItem('slm_chat_sessions') || '[]');
+            let session = sessions.find(s => s.id === currentSessionId);
+            
+            if (!session) {
+                // First user message is the title
+                const firstUserMsg = chatHistory.find(m => m.role === 'user');
+                const title = firstUserMsg ? firstUserMsg.content.substring(0, 35) + (firstUserMsg.content.length > 35 ? '...' : '') : 'New Chat';
+                session = {
+                    id: currentSessionId,
+                    timestamp: Date.now(),
+                    title: title,
+                    messages: chatHistory
+                };
+                sessions.unshift(session);
+            } else {
+                session.messages = chatHistory;
+                session.timestamp = Date.now();
+                // Move to top of history list
+                sessions = [session, ...sessions.filter(s => s.id !== currentSessionId)];
+            }
+            
+            localStorage.setItem('slm_chat_sessions', JSON.stringify(sessions));
+        }
+
+        function renderHistoryList() {
+            const listDiv = document.getElementById('historyList');
+            if (!listDiv) return;
+            
+            const sessions = JSON.parse(localStorage.getItem('slm_chat_sessions') || '[]');
+            if (sessions.length === 0) {
+                listDiv.innerHTML = `
+                    <div style="text-align:center; padding: 40px; color: var(--text-muted); font-size:13px;">
+                        <i class="fa-solid fa-clock-rotate-left" style="font-size: 30px; margin-bottom:12px; opacity: 0.3;"></i>
+                        <div>No chat history recorded yet.</div>
+                    </div>
+                `;
+                return;
+            }
+            
+            listDiv.innerHTML = '';
+            sessions.forEach(session => {
+                const item = document.createElement('div');
+                item.className = 'stat-card';
+                item.style.background = session.id === currentSessionId ? 'rgba(99, 102, 241, 0.04)' : 'rgba(255, 255, 255, 0.01)';
+                if (session.id === currentSessionId) {
+                    item.style.border = '1px solid var(--primary)';
+                } else {
+                    item.style.border = '1px solid var(--border-color)';
+                }
+                item.style.padding = '12px 16px';
+                item.style.borderRadius = '10px';
+                item.style.cursor = 'pointer';
+                item.style.display = 'flex';
+                item.style.justifyContent = 'space-between';
+                item.style.alignItems = 'center';
+                item.style.transition = 'var(--transition-smooth)';
+                
+                item.onclick = (e) => {
+                    if (e.target.closest('.delete-session-btn')) return;
+                    restoreSession(session.id);
+                };
+                
+                const date = new Date(session.timestamp).toLocaleString();
+                
+                item.innerHTML = `
+                    <div style="display:flex; flex-direction:column; gap:4px; max-width: calc(100% - 40px);">
+                        <span style="font-size:14px; font-weight:600; color:var(--text-main); white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">${escapeHtml(session.title)}</span>
+                        <span style="font-size:11px; color:var(--text-muted);"><i class="fa-regular fa-clock"></i> ${date}</span>
+                    </div>
+                    <button class="delete-session-btn btn-outline" style="border:none; background:transparent; color:var(--text-muted); cursor:pointer; width:30px; height:30px; display:flex; justify-content:center; align-items:center; border-radius:50%;" onclick="deleteSession('${session.id}')">
+                        <i class="fa-solid fa-trash-can" style="font-size: 13px;"></i>
+                    </button>
+                `;
+                
+                item.onmouseenter = () => { item.style.background = 'rgba(99, 102, 241, 0.08)'; };
+                item.onmouseleave = () => { item.style.background = session.id === currentSessionId ? 'rgba(99, 102, 241, 0.04)' : 'rgba(255, 255, 255, 0.01)'; };
+                
+                listDiv.appendChild(item);
+            });
+        }
+
+        function restoreSession(sessionId) {
+            const sessions = JSON.parse(localStorage.getItem('slm_chat_sessions') || '[]');
+            const session = sessions.find(s => s.id === sessionId);
+            if (!session) return;
+            
+            currentSessionId = session.id;
+            chatHistory = [...session.messages];
+            
+            const chatMessages = document.getElementById('chatMessages');
+            chatMessages.innerHTML = '';
+            document.getElementById('chatEmpty').style.display = 'none';
+            
+            chatHistory.forEach(msg => {
+                appendMessage(msg.role, msg.content);
+            });
+            
+            switchTab('chat');
+        }
+
+        function deleteSession(sessionId) {
+            let sessions = JSON.parse(localStorage.getItem('slm_chat_sessions') || '[]');
+            sessions = sessions.filter(s => s.id !== sessionId);
+            localStorage.setItem('slm_chat_sessions', JSON.stringify(sessions));
+            
+            if (currentSessionId === sessionId) {
+                clearChat();
+            } else {
+                renderHistoryList();
+            }
+        }
+
+        function clearAllSessions() {
+            if (confirm("Are you sure you want to clear all chat history?")) {
+                localStorage.removeItem('slm_chat_sessions');
+                clearChat();
+                renderHistoryList();
+            }
+        }
+
         function clearChat() {
             document.getElementById('chatMessages').innerHTML = '';
             document.getElementById('chatEmpty').style.display = 'flex';
+            chatHistory = [];
+            currentSessionId = null;
         }
 
         function handleChatKey(e) {
@@ -1577,8 +2096,10 @@
             
             // Add to history
             chatHistory.push({ role: 'user', content: prompt });
-            // Keep history manageable (last 10 messages)
-            if (chatHistory.length > 10) chatHistory.shift();
+            if (!currentSessionId) {
+                currentSessionId = 'session_' + Date.now();
+            }
+            saveCurrentSession();
 
             textarea.value = '';
             textarea.style.height = '36px';
@@ -1639,6 +2160,7 @@
                                     if (parsed.done) {
                                         bubbleStats.innerText = `Tokens: ${parsed.tokens_generated} | Speed: ${parsed.speed_tokens_sec.toFixed(1)} tok/s`;
                                         chatHistory.push({ role: 'assistant', content: fullResponse });
+                                        saveCurrentSession();
                                     } else if (parsed.token) {
                                         fullResponse += parsed.token;
                                         botMsgDiv.dataset.rawText = fullResponse;
@@ -1667,6 +2189,7 @@
 
                     appendMessage('assistant', data.response);
                     chatHistory.push({ role: 'assistant', content: data.response });
+                    saveCurrentSession();
                     
                     const lastMsg = document.querySelector('.chat-message.assistant:last-child');
                     lastMsg.querySelector('.msg-stats').innerText = `Tokens: ${data.tokens_generated} | Speed: ${data.speed_tokens_sec.toFixed(1)} tok/s`;
@@ -1713,6 +2236,7 @@
         function escapeHtml(text) {
             return text
                 .replace(/&/g, "&amp;")
+                .replace(/&amp;amp;/g, "&amp;") // double escape prevention
                 .replace(/</g, "&lt;")
                 .replace(/>/g, "&gt;")
                 .replace(/"/g, "&quot;")
@@ -1720,7 +2244,6 @@
         }
 
         function formatCodeBlocks(text) {
-            // Fixed JavaScript backslash evaluation pattern to process multi-line code structures properly
             const codeBlockRegex = /```([\s\S]*?)```/g;
             return text.replace(codeBlockRegex, '<pre><code>$1</code></pre>');
         }

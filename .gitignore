@@ -1,4 +1,8 @@
 __pycache__/
+models/
 data_corpus/*
 !data_corpus/.gitkeep
-
+*.log
+.DS_Store
+.env
+node_modules/
