@@ -4,6 +4,20 @@ SLM Studio is a professional-grade suite for training, converting, and serving S
 
 ---
 
+
+## Webui Preview
+
+<p align="center">
+  <img src="imgs/1.jpg" width="48%" alt="WebUI Preview 1" />
+  <img src="imgs/2.jpg" width="48%" alt="WebUI Preview 2" />
+</p>
+
+<p align="center">
+  <img src="imgs/3.jpg" width="48%" alt="WebUI Preview 3" />
+  <img src="imgs/4.jpg" width="48%" alt="WebUI Preview 4" />
+</p>
+
+
 ## ⚠️ CRITICAL HARDWARE WARNING
 **RAM Management & Stability:**
 *   **Safetensors Models:** Running inference `.safetensors` files is **extremely RAM-intensive**. On most Android devices, this can lead to system-level crashes or the Android OOM (Out-of-Memory) killer terminating the app.I tried to load .safetensors models but I failed because I can't install safetensor pip module in termux.So no support for . safetensors model just use gguf model instead
