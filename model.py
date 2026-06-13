@@ -15,10 +15,10 @@ DEFAULT_CONFIG = {
     "learning_rate": 8e-4,
     "min_lr": 8e-5,
     "batch_size": 8,
-    "max_iters": 500,
+    "max_iters": 1000,
     "eval_interval": 250,
-    "save_interval": 1000,
-    "num_threads": 6,
+    "save_interval": 500,
+    "num_threads": 4,
     "dropout": 0.1,
     "weight_decay": 0.1,
     "temperature": 0.75,
@@ -170,68 +170,51 @@ class QwenTokenizer:
         self.pad_token = self.vocab.get("<|endoftext|>", 151643)
 
     def encode(self, text: str, bos: bool = False, eos: bool = False) -> list[int]:
+        # Very simplified encoding: just try to match longest substrings from vocab
+        # In a real scenario, this should be BPE. For now, we'll do basic mapping.
+        # Since Qwen vocab is large, we'll just handle basic ASCII/UTF-8 bytes as fallbacks if possible
+        # or just use a placeholder if we don't want to implement full BPE here.
+        # Actually, for inference to work at all, we need proper BPE.
+        # Let's try to use a simple greedy approach for now, or just warn.
         tokens = []
         if bos: tokens.append(self.bos_token)
         
-        # Greedy longest-match encoding
+        # Fallback to UTF-8 bytes mapped to vocab if BPE not implemented
+        # Qwen vocab contains byte-level entries like "<0x00>" etc.
         i = 0
         while i < len(text):
             found = False
-            # Try to match longest possible substring in vocab
-            for length in range(min(32, len(text) - i), 0, -1):
+            for length in range(min(20, len(text) - i), 0, -1):
                 sub = text[i:i+length]
                 if sub in self.vocab:
                     tokens.append(self.vocab[sub])
                     i += length
                     found = True
                     break
-            
             if not found:
-                # Fallback to byte-level tokens
+                # Map to byte token if possible
                 byte_val = text[i].encode('utf-8')
                 for b in byte_val:
                     byte_repr = f"<0x{b:02X}>"
-                    if byte_repr in self.vocab:
-                        tokens.append(self.vocab[byte_repr])
-                    else:
-                        # Extreme fallback
-                        tokens.append(0)
+                    tokens.append(self.vocab.get(byte_repr, self.vocab.get(chr(b), 0)))
                 i += 1
         
         if eos: tokens.append(self.eos_token)
         return tokens
 
     def decode(self, tokens: list[int]) -> str:
-        full_res = ""
-        byte_data = bytearray()
+        res = ""
         for t in tokens:
             if t in self.inv_vocab:
                 s = self.inv_vocab[t]
-                if s.startswith("<0x") and len(s) == 6 and s.endswith(">"):
+                if s.startswith("<0x") and s.endswith(">"):
                     try:
-                        byte_data.append(int(s[3:5], 16))
+                        res += chr(int(s[3:5], 16))
                     except:
-                        if byte_data:
-                            full_res += byte_data.decode('utf-8', errors='replace')
-                            byte_data = bytearray()
-                        full_res += s
-                elif s in ["<|endoftext|>", "<|im_start|>", "<|im_end|>"]:
-                    continue
-                else:
-                    if byte_data:
-                        full_res += byte_data.decode('utf-8', errors='replace')
-                        byte_data = bytearray()
-                    full_res += s
-            else:
-                # Unknown token
-                if byte_data:
-                    full_res += byte_data.decode('utf-8', errors='replace')
-                    byte_data = bytearray()
-                
-        if byte_data:
-            full_res += byte_data.decode('utf-8', errors='replace')
-            
-        return full_res
+                        res += s
+                elif s not in ["<|endoftext|>", "<|im_start|>", "<|im_end|>"]:
+                    res += s
+        return res
 
 # --- 3. HARDWARE CAPABILITY MONITOR ---
 def get_device():
@@ -392,7 +375,7 @@ class Qwen3Model(nn.Module):
             
         return logits, loss, new_kv_caches
 
-    @torch.inference_mode()
+    @torch.no_grad()
     def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, callback=None):
         self.eval()
         B, T = idx.shape
@@ -514,8 +497,8 @@ class TermuxSLM(nn.Module):
         loss = F.cross_entropy(logits.view(-1, self.vocab_size), targets.view(-1)) if targets is not None else None
         return logits, loss, new_kv_caches
 
-    @torch.inference_mode()
-    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, callback=None, eos_id=None):
+    @torch.no_grad()
+    def generate(self, idx, max_new_tokens, temperature=1.0, top_k=None, callback=None):
         # Implementation similar to Qwen3Model.generate but using self.vocab_size
         self.eval()
         kv_caches = [None] * len(self.layers)
@@ -527,19 +510,7 @@ class TermuxSLM(nn.Module):
         probs = F.softmax(next_token_logits, dim=-1); next_token = torch.multinomial(probs, num_samples=1)
         generated = [next_token.item()]
         if callback: callback(next_token.item())
-        
-        # Support multiple EOS tokens
-        if eos_id is None:
-            eos_ids = []
-        elif isinstance(eos_id, int):
-            eos_ids = [eos_id]
-        else:
-            eos_ids = eos_id
-            
         for _ in range(max_new_tokens - 1):
-            if next_token.item() in eos_ids:
-                break
-                
             logits, _, kv_caches = self(next_token, kv_caches=kv_caches)
             next_token_logits = logits[:, -1, :].to(torch.float32) / (temperature + 1e-5)
             if top_k is not None:
@@ -548,7 +519,7 @@ class TermuxSLM(nn.Module):
             probs = F.softmax(next_token_logits, dim=-1); next_token = torch.multinomial(probs, num_samples=1)
             generated.append(next_token.item())
             if callback: callback(next_token.item())
-            
+            if next_token.item() == 258: break
         return generated
 
 # --- 6. MULTI-SOURCE CORPUS COMPILATION PIPELINE ---
@@ -597,14 +568,9 @@ def compile_training_corpus(data_directory="data_corpus", fallback_file="trainin
     return compiled_text
 
 def get_batch(data, block_size, batch_size):
-    if len(data) <= block_size:
-        raise ValueError(f"Dataset length ({len(data)}) must be greater than block size ({block_size}). Please check your corpus size.")
-    
-    # Vectorized indexing avoids slow Python loops and stacking on mobile CPU
-    ix = torch.randint(len(data) - block_size, (batch_size,), device=data.device)
-    indices = ix.unsqueeze(1) + torch.arange(block_size, device=data.device)
-    x = data[indices]
-    y = data[indices + 1]
+    ix = torch.randint(len(data) - block_size, (batch_size,))
+    x = torch.stack([data[i:i+block_size] for i in ix])
+    y = torch.stack([data[i+1:i+block_size+1] for i in ix])
     return x, y
 
 @torch.no_grad()
@@ -621,7 +587,7 @@ def estimate_loss(model, data, block_size, batch_size, eval_iters=5):
 # --- 7. PRODUCTION CONTINUAL LEARNING LOOP ---
 if __name__ == "__main__":
     print("================================================================")
-    print("  Professional Continual Learning Engine (ARM Architecture) ")
+    print("  Professional Continual Learning Engine (ARM Mobile Architecture) ")
     print("================================================================")
     
     model_dir = "models/native_slm"
@@ -630,11 +596,6 @@ if __name__ == "__main__":
     config = load_config(config_path if os.path.exists(config_path) else "model_config.json")
     torch.set_num_threads(config["num_threads"])
     torch.set_num_interop_threads(1)
-    
-    # Optimization for ARM CPUs
-    if hasattr(torch, 'set_flush_denormal'):
-        torch.set_flush_denormal(True)
-    
     device = get_device()
     
     print(f"Hardware Worker Threads Assigned: {config['num_threads']}")
@@ -644,34 +605,19 @@ if __name__ == "__main__":
     os.makedirs("models", exist_ok=True)
     os.makedirs("data_corpus", exist_ok=True)
     
-    data_bin_path = os.path.join("data_corpus", "data.bin")
+    try:
+        raw_text_stream = compile_training_corpus()
+    except Exception as e:
+        print(f"[-] Processing Interrupted: {e}")
+        exit(1)
+        
+    print(f"[Data Pipeline] Unified raw characters inside text stream: {len(raw_text_stream):,}")
     tokenizer = ByteTokenizer()
     
-    if os.path.exists(data_bin_path):
-        print(f"[Data Pipeline] Loading pre-tokenized data from {data_bin_path}...")
-        try:
-            data_tensor = torch.load(data_bin_path, map_location=device)
-            print(f"[Data Pipeline] Successfully loaded {len(data_tensor):,} tokens.")
-        except Exception as e:
-            print(f"[-] Failed to load {data_bin_path}: {e}. Re-tokenizing...")
-            data_tensor = None
-    else:
-        data_tensor = None
-
-    if data_tensor is None:
-        try:
-            raw_text_stream = compile_training_corpus()
-        except Exception as e:
-            print(f"[-] Processing Interrupted: {e}")
-            exit(1)
-            
-        print(f"[Data Pipeline] Unified raw characters inside text stream: {len(raw_text_stream):,}")
-        print("[Data Pipeline] Transforming symbols into byte-level tensors...")
-        encoded_stream = tokenizer.encode(raw_text_stream, bos=True, eos=True)
-        data_tensor = torch.tensor(encoded_stream, dtype=torch.long, device=device)
-        print(f"[Data Pipeline] Saving tokenized binary to {data_bin_path}...")
-        torch.save(data_tensor, data_bin_path)
-        print(f"[Data Pipeline] Total token sequences built: {len(data_tensor):,}")
+    print("[Data Pipeline] Transforming symbols into byte-level tensors...")
+    encoded_stream = tokenizer.encode(raw_text_stream, bos=True, eos=True)
+    data_tensor = torch.tensor(encoded_stream, dtype=torch.long, device=device)
+    print(f"[Data Pipeline] Total token sequences built for memory assignment: {len(data_tensor):,}")
     
     # 90/10 Train and Evaluation data splitting
     split_idx = int(0.9 * len(data_tensor))

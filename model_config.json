@@ -12,8 +12,10 @@
     "num_threads": 6,
     "dropout": 0.1,
     "weight_decay": 0.1,
-    "temperature": 0.75,
-    "top_k": 40,
-    "max_new_tokens": 200,
-    "stream": true
+    "temperature": 0.25,
+    "top_k": 10,
+    "max_new_tokens": 90,
+    "stream": true,
+    "model_type": "gguf",
+    "parameters": "Quantized GGUF"
 }
