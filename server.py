@@ -201,7 +201,7 @@ class ExternalTrainingManager:
                     s.connect(("127.0.0.1", 5001))
                     s.close()
                     self.log("[!] Port 5001 is already in use. Cleaning up...")
-                    os.system("fuser -k 5001/tcp >/dev/null 2>&1 || true")
+                    os.system("fuser -k 5001/tcp >/dev/null 2>&1 || pkill -f llama-server >/dev/null 2>&1 || true")
                     time.sleep(0.5)
                 except Exception:
                     pass

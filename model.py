@@ -597,9 +597,14 @@ def compile_training_corpus(data_directory="data_corpus", fallback_file="trainin
     return compiled_text
 
 def get_batch(data, block_size, batch_size):
-    ix = torch.randint(len(data) - block_size, (batch_size,))
-    x = torch.stack([data[i:i+block_size] for i in ix])
-    y = torch.stack([data[i+1:i+block_size+1] for i in ix])
+    if len(data) <= block_size:
+        raise ValueError(f"Dataset length ({len(data)}) must be greater than block size ({block_size}). Please check your corpus size.")
+    
+    # Vectorized indexing avoids slow Python loops and stacking on mobile CPU
+    ix = torch.randint(len(data) - block_size, (batch_size,), device=data.device)
+    indices = ix.unsqueeze(1) + torch.arange(block_size, device=data.device)
+    x = data[indices]
+    y = data[indices + 1]
     return x, y
 
 @torch.no_grad()

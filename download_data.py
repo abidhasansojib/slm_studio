@@ -5,29 +5,47 @@ import time
 def download_file(url, filename):
     print(f"[*] Downloading {filename}...")
     start_time = time.time()
+    temp_filename = filename + ".tmp"
     try:
         # User-agent header to prevent 403 errors from some servers
         req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req) as response, open(filename, 'wb') as out_file:
-            out_file.write(response.read())
+        with urllib.request.urlopen(req) as response, open(temp_filename, 'wb') as out_file:
+            chunk_size = 1024 * 1024  # 1MB
+            while True:
+                chunk = response.read(chunk_size)
+                if not chunk:
+                    break
+                out_file.write(chunk)
+        
+        # Swap temporary file with real file name
+        if os.path.exists(filename):
+            os.remove(filename)
+        os.rename(temp_filename, filename)
         
         duration = time.time() - start_time
         size = os.path.getsize(filename) / (1024 * 1024)
         print(f"[+] Success! {filename} ({size:.2f} MB) downloaded in {duration:.1f}s")
+        return True
     except Exception as e:
         print(f"[-] Error downloading {filename}: {e}")
+        if os.path.exists(temp_filename):
+            try:
+                os.remove(temp_filename)
+            except:
+                pass
+        return False
 
 def main():
     data_dir = "data_corpus"
     if not os.path.exists(data_dir):
         os.makedirs(data_dir)
 
-    # Comprehensive list of training data for a 50M parameter model
+    # Lightweight training dataset optimized for mobile training
     datasets = [
         # --- THE CORE: TINY STORIES (High Quality Reasoning) ---
         {
-            "url": "https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStoriesV2-GPT4-train.txt",
-            "name": "tinystories_train.txt"
+            "url": "https://huggingface.co/datasets/roneneldan/TinyStories/resolve/main/TinyStoriesV2-GPT4-valid.txt",
+            "name": "tinystories_valid.txt"
         },
         
         # --- CLASSIC LITERATURE (Grammar & Style) ---
@@ -58,8 +76,8 @@ def main():
         
         # --- KNOWLEDGE & ENCYCLOPEDIC (Facts) ---
         {
-            "url": "https://huggingface.co/datasets/sedthh/wikipedia-24-09-simple-corpus/resolve/main/simple_wikipedia.txt",
-            "name": "wikitext.txt" # Using high quality simple-wikipedia
+            "url": "https://raw.githubusercontent.com/pytorch/examples/master/word_language_model/data/wikitext-2/valid.txt",
+            "name": "wikitext_valid.txt" # Using clean public validation set of wikitext
         },
         
         # --- TECHNICAL & PHILOSOPHY (Logic) ---
@@ -68,15 +86,15 @@ def main():
             "name": "philosophy_basics_republic.txt" # Plato's Republic
         },
         {
-            "url": "https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt",
-            "name": "dictionary_full.txt" # English Word List
+            "url": "https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt",
+            "name": "tinyshakespeare.txt" # High-quality literary patterns
         }
     ]
 
     print("====================================================")
-    print("      SLM Data Acquisition Script (Full Corpus)      ")
+    print("      SLM Data Acquisition Script (Lightweight)      ")
     print("====================================================")
-    print(f"Targeting {len(datasets)} data sources for 50M model training.\n")
+    print(f"Targeting {len(datasets)} data sources for mobile training.\n")
     
     for ds in datasets:
         target_path = os.path.join(data_dir, ds["name"])
@@ -87,8 +105,8 @@ def main():
         download_file(ds["url"], target_path)
 
     print("\n[+] Data acquisition complete!")
-    print("[i] Total corpus size will be approx. 500MB - 800MB.")
-    print("[i] Start training via the Web UI (Port 5000).")
+    print("[i] Total corpus size is approx. 26MB (perfect for mobile training).")
+    print("[i] Start training via the Web UI (Port 5000) or python model.py.")
 
 if __name__ == "__main__":
     main()
