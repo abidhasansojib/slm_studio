@@ -6,7 +6,7 @@ SLM Studio is a professional-grade suite for training, converting, and serving S
 
 ## ⚠️ CRITICAL HARDWARE WARNING
 **RAM Management & Stability:**
-*   **PyTorch/Safetensors Models:** Running inference or training using raw `.pt` or `.safetensors` files is **extremely RAM-intensive**. On most Android devices, this can lead to system-level crashes or the Android OOM (Out-of-Memory) killer terminating the app.
+*   **Safetensors Models:** Running inference `.safetensors` files is **extremely RAM-intensive**. On most Android devices, this can lead to system-level crashes or the Android OOM (Out-of-Memory) killer terminating the app.I tried to load .safetensors models but I failed because I can't install safetensor pip module in termux.Maybe work
 *   **Recommendation:** For stable chat interactions, I highly recommend converting your trained models to **GGUF format**. GGUF supports quantization and memory mapping, which drastically reduces RAM usage and prevents crashes.
 
 ---
