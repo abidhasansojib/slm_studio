@@ -126,7 +126,7 @@ You can download GGUF or Safetensors models from Hugging Face:
 
 ## 🛠 Troubleshooting
 
-*   **Server won't start:** Ensure no other app is using port 5000.
+*   **Server won't start:** Ensure no other app is using port 5000.If running then close termux completely and then reopen and try runing again
 *   **Training is slow:** Reduce `batch_size` or `n_embd`. Mobile CPUs have thermal limits.
 *   **GGUF Chat Error:** Ensure `llama-cpp` is installed via `pkg`. If the package is missing, the server will log a warning.
 
